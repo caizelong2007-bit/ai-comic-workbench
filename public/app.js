@@ -331,14 +331,15 @@ function bindEvents() {
       runAssetImage(assetButton.dataset.generateAsset);
       return;
     }
+    const deleteButton = event.target.closest("[data-delete-asset]");
+    if (deleteButton) {
+      event.stopPropagation();
+      openDeleteAssetConfirm(deleteButton.dataset.deleteAsset);
+      return;
+    }
     const editButton = event.target.closest("[data-edit-asset]");
     if (editButton) {
       openAssetModal({ id: editButton.dataset.editAsset });
-      return;
-    }
-    const deleteButton = event.target.closest("[data-delete-asset]");
-    if (deleteButton) {
-      openDeleteAssetConfirm(deleteButton.dataset.deleteAsset);
       return;
     }
   });
