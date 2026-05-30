@@ -448,7 +448,13 @@ function setShotAssetTab(shotId, type = "all") {
 }
 
 async function parseResponse(response) {
-  const data = await response.json().catch(() => ({}));
+  const raw = await response.text();
+  let data = {};
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error(`接口返回非 JSON 内容：HTTP ${response.status}`);
+  }
   if (!response.ok || data.ok === false) {
     throw new Error(data.error || `HTTP ${response.status}`);
   }

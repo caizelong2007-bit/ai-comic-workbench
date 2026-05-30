@@ -378,6 +378,10 @@ async function route(req, res) {
     return serveStatic(res, pathname, CACHE_DIR, "/cache/");
   }
 
+  if (pathname === "/api" || pathname.startsWith("/api/")) {
+    return sendJson(res, 404, { ok: false, error: "API route not found" });
+  }
+
   return serveStatic(res, pathname === "/" ? "/index.html" : pathname, PUBLIC_DIR, "/");
 }
 
