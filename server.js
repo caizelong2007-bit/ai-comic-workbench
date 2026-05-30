@@ -266,6 +266,11 @@ async function route(req, res) {
     return sendJson(res, 200, await openProject(body.projectId || body.id));
   }
 
+  if (pathname === "/api/projects/delete" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await deleteProject(body.projectId || body.id));
+  }
+
   if (pathname === "/api/story-script" && req.method === "POST") {
     const body = await readBody(req);
     return sendJson(res, 200, await updateStoryScript(body));
@@ -279,6 +284,11 @@ async function route(req, res) {
   if (pathname === "/api/episodes/open" && req.method === "POST") {
     const body = await readBody(req);
     return sendJson(res, 200, await openEpisode(body.episodeId || body.id));
+  }
+
+  if (pathname === "/api/episodes/delete" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await deleteEpisode(body.episodeId || body.id));
   }
 
   if (pathname === "/api/episodes/script" && req.method === "POST") {
@@ -307,6 +317,11 @@ async function route(req, res) {
   if (pathname === "/api/assets/manual" && req.method === "POST") {
     const body = await readBody(req);
     return sendJson(res, 200, await saveManualAsset(body));
+  }
+
+  if (pathname === "/api/assets/delete" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await deleteAsset(body.assetId || body.id));
   }
 
   if (pathname === "/api/reset" && req.method === "POST") {
@@ -361,6 +376,10 @@ async function route(req, res) {
 
   if (pathname.startsWith("/cache/")) {
     return serveStatic(res, pathname, CACHE_DIR, "/cache/");
+  }
+
+  if (pathname === "/api" || pathname.startsWith("/api/")) {
+    return sendJson(res, 404, { ok: false, error: "API route not found" });
   }
 
   return serveStatic(res, pathname === "/" ? "/index.html" : pathname, PUBLIC_DIR, "/");
@@ -1828,6 +1847,123 @@ function publicReferenceImageInfo(image = {}) {
     name: image.name || "",
     mode: image.mode || (String(image.url || "").startsWith("data:image/") ? "data-url" : "url")
   };
+}
+
+function activeProjectSnapshot(projects = {}, state = {}) {
+  const project = (projects.projects || []).find((item) => item.id === projects.activeProjectId) || {};
+  return {
+    ...project,
+    state
+  };
+}
+
+function collectProjectResourceUrls(project = {}) {
+  const urls = new Set();
+  collectResourceUrls(project.coverUrl, urls);
+  collectResourceUrls(project.config?.project?.projectStyles, urls);
+  collectResourceUrls(project.config?.project?.styleReferenceImage, urls);
+  collectResourceUrls(project.state, urls);
+  return urls;
+}
+
+function collectAllProjectResourceUrls(projects = {}) {
+  const urls = new Set();
+  for (const project of projects.projects || []) {
+    for (const url of collectProjectResourceUrls(project)) {
+      urls.add(url);
+    }
+  }
+  return urls;
+}
+
+function collectResourceUrls(value, urls = new Set()) {
+  if (!value) return urls;
+  if (typeof value === "string") {
+    if (value.startsWith("/cache/")) urls.add(value);
+    return urls;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectResourceUrls(item, urls);
+    return urls;
+  }
+  if (typeof value === "object") {
+    for (const key of ["url", "imageUrl", "coverUrl", "file", "thumbnailUrl", "originalUrl"]) {
+      collectResourceUrls(value[key], urls);
+    }
+    for (const item of Object.values(value)) {
+      if (item && typeof item === "object") collectResourceUrls(item, urls);
+    }
+  }
+  return urls;
+}
+
+async function cleanupUnreferencedCacheFiles(candidateUrls = new Set(), projects = {}) {
+  const remainingUrls = collectAllProjectResourceUrls(projects);
+  const removed = [];
+  for (const url of candidateUrls || []) {
+    if (!String(url || "").startsWith("/cache/") || remainingUrls.has(url)) {
+      continue;
+    }
+    const filePath = localCachePathFromUrl(url);
+    if (!filePath || !isDeletableCachePath(filePath)) {
+      continue;
+    }
+    try {
+      await fs.unlink(filePath);
+      removed.push(url);
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        console.warn(`Unable to delete cache file ${url}: ${error.message}`);
+      }
+    }
+  }
+  return removed;
+}
+
+function isDeletableCachePath(filePath = "") {
+  const fullPath = path.resolve(filePath);
+  const imageRoot = path.resolve(IMAGE_DIR);
+  const videoRoot = path.resolve(VIDEO_DIR);
+  return fullPath.startsWith(`${imageRoot}${path.sep}`) || fullPath.startsWith(`${videoRoot}${path.sep}`);
+}
+
+function stripAssetFromPromptPackage(pack = {}, assetId = "") {
+  let changed = false;
+  const removeRefs = (refs) => {
+    const input = Array.isArray(refs) ? refs : [];
+    const output = input.filter((id) => id !== assetId);
+    if (output.length !== input.length) changed = true;
+    return output;
+  };
+  const next = {
+    ...pack,
+    assetRefs: removeRefs(pack.assetRefs),
+    assetReferences: (pack.assetReferences || []).filter((asset) => {
+      const keep = asset.id !== assetId;
+      if (!keep) changed = true;
+      return keep;
+    }),
+    audio: (pack.audio || []).map((row) => ({
+      ...row,
+      assetRefs: removeRefs(row.assetRefs)
+    })),
+    dialogue: (pack.dialogue || []).map((row) => {
+      const speakerAssetId = row.speakerAssetId === assetId ? "" : row.speakerAssetId;
+      if (speakerAssetId !== row.speakerAssetId) changed = true;
+      return { ...row, speakerAssetId };
+    }),
+    subShots: (pack.subShots || []).map((subShot) => ({
+      ...subShot,
+      assetRefs: removeRefs(subShot.assetRefs)
+    }))
+  };
+  return { pack: next, changed };
+}
+
+function videoUsesAsset(video = {}, assetId = "") {
+  return (video.referenceImages || []).some((image) => image.id === assetId)
+    || (video.requestPayload?.image_urls || []).some((url) => String(url || "").includes(assetId))
+    || String(video.prompt || "").includes(assetId);
 }
 
 function projectAttributes(project = {}) {
@@ -3318,6 +3454,61 @@ async function openProject(projectId) {
   };
 }
 
+async function deleteProject(projectId) {
+  if (!projectId) {
+    throw new Error("Missing project id");
+  }
+  const projects = await readProjects();
+  const project = projects.projects.find((item) => item.id === projectId);
+  if (!project) {
+    throw new Error("Project not found");
+  }
+  const wasActiveProject = projects.activeProjectId === projectId;
+  const deletedResources = collectProjectResourceUrls(project);
+  projects.projects = projects.projects.filter((item) => item.id !== projectId);
+  const nextProject = wasActiveProject
+    ? sortProjects(projects.projects)[0] || null
+    : projects.projects.find((item) => item.id === projects.activeProjectId) || sortProjects(projects.projects)[0] || null;
+  projects.projects = sortProjects(projects.projects);
+  projects.activeProjectId = nextProject?.id || null;
+  const removedFiles = await cleanupUnreferencedCacheFiles(deletedResources, projects);
+
+  if (nextProject) {
+    const platformConfig = await readConfig();
+    const config = configForProject(platformConfig, nextProject.config || DEFAULT_CONFIG);
+    const nextState = normalizeState(nextProject.state || freshState());
+    await writeConfig(config);
+    await writeState(nextState);
+    nextProject.config = projectConfigForStorage(config);
+    nextProject.coverUrl = inferProjectCover(nextState);
+    await writeProjects(projects);
+    return {
+      ok: true,
+      deletedProjectId: projectId,
+      removedFiles,
+      project: projectForClient(nextProject),
+      projects: projectListForClient(projects),
+      activeProjectId: nextProject.id,
+      config: sanitizeConfig(config),
+      state: nextState
+    };
+  }
+
+  const config = await readConfig();
+  const nextState = freshState();
+  await writeState(nextState);
+  await writeProjects(projects);
+  return {
+    ok: true,
+    deletedProjectId: projectId,
+    removedFiles,
+    projects: [],
+    activeProjectId: null,
+    config: sanitizeConfig(config),
+    state: nextState
+  };
+}
+
 async function updateStoryScript(payload = {}) {
   const [config, state] = await Promise.all([readConfig(), readState()]);
   const title = stringOr(payload.title, config.project.title || "未命名项目");
@@ -3418,6 +3609,38 @@ async function openEpisode(episodeId) {
   return { ok: true, state, episode };
 }
 
+async function deleteEpisode(episodeId) {
+  if (!episodeId) {
+    throw new Error("Missing episode id");
+  }
+  const state = await readState();
+  const episode = (state.episodes || []).find((item) => item.id === episodeId);
+  if (!episode) {
+    throw new Error("Episode not found");
+  }
+  const projects = await readProjects();
+  const beforeResources = collectProjectResourceUrls(activeProjectSnapshot(projects, state));
+  state.episodes = (state.episodes || []).filter((item) => item.id !== episodeId);
+  if (state.activeEpisodeId === episodeId) {
+    state.activeEpisodeId = state.episodes[0]?.id || null;
+  }
+  touchState(state);
+  addEvent(state, "episode.deleted", `${episode.title || episode.id} deleted`, "local");
+  await writeState(state);
+  await syncActiveProject({ state });
+  const nextProjects = await readProjects();
+  const removedFiles = await cleanupUnreferencedCacheFiles(beforeResources, nextProjects);
+  const latestProjects = await readProjects();
+  return {
+    ok: true,
+    deletedEpisodeId: episodeId,
+    removedFiles,
+    state,
+    projects: projectListForClient(latestProjects),
+    activeProjectId: latestProjects.activeProjectId
+  };
+}
+
 async function updateEpisodeScript(payload = {}) {
   const [config, state] = await Promise.all([readConfig(), readState()]);
   const episodeId = payload.episodeId || state.activeEpisodeId;
@@ -3511,6 +3734,62 @@ async function saveManualAsset(payload = {}) {
   await writeState(state);
   await syncActiveProject({ state });
   return { ok: true, state, asset: card };
+}
+
+async function deleteAsset(assetId) {
+  if (!assetId) {
+    throw new Error("Missing asset id");
+  }
+  const state = await readState();
+  const asset = findAssetById(state.cards, assetId);
+  if (!asset) {
+    throw new Error("Asset not found");
+  }
+  const projects = await readProjects();
+  const beforeResources = collectProjectResourceUrls(activeProjectSnapshot(projects, state));
+  const type = normalizeAssetType(asset.type);
+  const listKey = assetListKey(type);
+  state.cards[listKey] = (state.cards[listKey] || []).filter((item) => item.id !== assetId);
+  state.assetImages = (state.assetImages || []).filter((image) => image.assetId !== assetId);
+  if (state.assetImageHistory) {
+    delete state.assetImageHistory[assetId];
+  }
+  for (const episode of state.episodes || []) {
+    let touched = false;
+    episode.shots = (episode.shots || []).map((shot) => {
+      const refs = (shot.assetRefs || []).filter((id) => id !== assetId);
+      if (refs.length !== (shot.assetRefs || []).length) touched = true;
+      return { ...shot, assetRefs: refs };
+    });
+    episode.promptPackages = (episode.promptPackages || []).map((pack) => {
+      const filtered = stripAssetFromPromptPackage(pack, assetId);
+      if (filtered.changed) touched = true;
+      return filtered.pack;
+    });
+    episode.videos = (episode.videos || []).map((video) => {
+      const usesAsset = videoUsesAsset(video, assetId);
+      if (usesAsset) touched = true;
+      return usesAsset
+        ? { ...video, stale: true, staleReason: "asset-deleted", staleAt: new Date().toISOString() }
+        : video;
+    });
+    if (touched) touchEpisode(episode);
+  }
+  touchState(state);
+  addEvent(state, "asset.deleted", `${asset.name || asset.id} deleted`, "local");
+  await writeState(state);
+  await syncActiveProject({ state });
+  const nextProjects = await readProjects();
+  const removedFiles = await cleanupUnreferencedCacheFiles(beforeResources, nextProjects);
+  const latestProjects = await readProjects();
+  return {
+    ok: true,
+    deletedAssetId: assetId,
+    removedFiles,
+    state,
+    projects: projectListForClient(latestProjects),
+    activeProjectId: latestProjects.activeProjectId
+  };
 }
 
 async function saveDataUrlImage(dataUrl, name = "asset") {
