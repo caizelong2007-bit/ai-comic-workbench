@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 漫剧工作台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand-block">
+      <p class="eyebrow">Local AI Drama Studio</p>
+      <h1>AI 漫剧工作台</h1>
+    </div>
+    <div class="topbar-actions">
+      <span id="serviceStatus" class="status-pill">连接中</span>
+      <button id="runAllBtn" class="primary">生成当前剧集提示词</button>
+      <button id="openModelCenterBtn" type="button">模型中心</button>
+      <button id="openEventsBtn">运行记录</button>
+      <button id="backProjectsBtn">项目列表</button>
+      <button id="refreshBtn">刷新</button>
+    </div>
+  </header>
+
+  <main id="projectHome" class="project-home">
+    <section class="project-home-head">
+      <div>
+        <p class="eyebrow">Projects</p>
+        <h2>项目列表</h2>
+      </div>
+      <label class="project-search">
+        <span>搜索项目名称</span>
+        <input id="projectSearchInput" autocomplete="off" placeholder="搜索项目名称">
+      </label>
+    </section>
+    <section id="projectGrid" class="project-grid"></section>
+  </main>
+
+  <main id="studioShell" class="studio-shell is-hidden">
+    <aside class="studio-sidebar" aria-label="制作流程">
+      <section class="project-mini">
+        <p class="eyebrow">Current Project</p>
+        <h2 id="sidebarProjectTitle">未选择项目</h2>
+        <small id="sidebarProjectMeta">项目属性会应用到所有剧集</small>
+      </section>
+
+      <section id="projectSetupNav" class="flow-group">
+        <div class="flow-group-title">
+          <span>项目设置</span>
+          <small>Global</small>
+        </div>
+        <button class="flow-step is-active" data-view="project-settings">
+          <span class="step-index">01</span>
+          <span><strong>项目设置</strong><small id="statusProjectSetup">剧本 / 属性 / 资产</small></span>
+        </button>
+      </section>
+
+      <section id="episodeListNav" class="flow-group episode-group">
+        <div class="flow-group-title">
+          <span>剧集列表</span>
+          <button id="addEpisodeBtn" class="mini-action" type="button">添加剧集</button>
+        </div>
+        <div id="episodeList" class="episode-list"></div>
+      </section>
+
+      <button id="resetBtn" class="danger reset-flow">重置当前流水线</button>
+    </aside>
+
+    <section class="studio-workspace">
+      <section class="workspace-hero">
+        <div>
+          <p class="eyebrow" id="viewEyebrow">Project</p>
+          <h2 id="viewTitle">项目设置</h2>
+          <p id="viewSummary">先确认项目剧本、属性和资产，保存后再创建剧集。</p>
+        </div>
+        <div class="progress-strip" id="progressStrip"></div>
+      </section>
+
+      <section id="episodeFlowNav" class="episode-top-nav is-hidden" aria-label="当前剧集编辑">
+        <div class="episode-top-title">
+          <p class="eyebrow">Current Episode</p>
+          <strong id="activeEpisodeName">未选择</strong>
+        </div>
+        <button class="episode-top-step" data-view="episode-script">
+          <strong>分集剧本</strong><small id="statusEpisodeScript">待填写</small>
+        </button>
+        <button class="episode-top-step" data-view="shot-making">
+          <strong>分镜制作</strong><small id="statusShots">未生成</small>
+        </button>
+        <button class="episode-top-step" data-view="shot-editing">
+          <strong>分镜剪辑</strong><small id="statusVideos">未生成</small>
+        </button>
+        <button class="episode-top-step" data-view="final-output">
+          <strong>输出成片</strong><small id="statusOutput">待接入</small>
+        </button>
+      </section>
+
+      <section id="project-settings" class="view-panel is-active">
+        <div class="settings-tabs" role="tablist" aria-label="项目设置模块">
+          <button class="settings-tab is-active" type="button" data-settings-tab="project-script-block">项目剧本</button>
+          <button class="settings-tab" type="button" data-settings-tab="project-attrs-block">项目属性</button>
+          <button class="settings-tab" type="button" data-settings-tab="project-assets-block">项目资产</button>
+          <button class="settings-tab" type="button" data-settings-tab="model-settings-block">模型选择</button>
+        </div>
+
+        <form id="configForm" class="params-form">
+          <input name="title" type="hidden">
+          <input name="genre" type="hidden">
+          <input name="audience" type="hidden">
+          <input name="visualStyle" type="hidden">
+          <input name="aspectRatio" type="hidden">
+          <input name="videoLength" type="hidden">
+          <input name="subtitles" type="hidden">
+          <input name="dialogueLanguage" type="hidden">
+          <input name="episodeDuration" type="hidden">
+          <input name="language" type="hidden">
+          <input name="projectStyles" type="hidden">
+          <input name="activeStyleId" type="hidden">
+        </form>
+
+        <section id="project-script-block" class="settings-block is-active">
+          <div class="panel-grid two-col">
+            <article class="panel-card">
+              <div class="section-head compact">
+                <div>
+                  <p class="eyebrow">Story Script</p>
+                  <h3>整部短剧剧本</h3>
+                </div>
+                <div class="button-row">
+                  <button id="saveStoryBtn">保存剧本</button>
+                  <button id="genScriptBtn">LLM 生成/重写</button>
+                  <button id="toAttrsBtn" class="primary" type="button">下一步：项目属性</button>
+                </div>
+              </div>
+              <label class="script-editor">
+                <span>项目剧本 / 故事梗概</span>
+                <textarea id="projectScriptInput" rows="16" placeholder="粘贴整部短剧剧本，或填写故事梗概。后续资产分析和分集创作都会继承这里的内容。"></textarea>
+              </label>
+            </article>
+            <article class="panel-card">
+              <div class="section-head compact">
+                <div>
+                  <p class="eyebrow">Structured Output</p>
+                  <h3>结构化剧本</h3>
+                </div>
+              </div>
+              <div id="scriptOutput" class="scene-list empty">还没有结构化剧本。</div>
+            </article>
+          </div>
+        </section>
+
+        <section id="project-attrs-block" class="settings-block">
+          <div class="section-head compact">
+            <div>
+              <p class="eyebrow">Style Parameters</p>
+              <h3>风格参数</h3>
+            </div>
+            <div class="button-row">
+              <button id="saveConfigBtn" type="button">保存参数</button>
+              <button id="toAssetsBtn" class="primary" type="button">下一步：项目资产</button>
+            </div>
+          </div>
+
+          <section class="param-section">
+            <div class="param-title">
+              <h4>视频风格</h4>
+              <small>自定义风格由参考图和提示词组成，选中后会应用到所有剧集生成。</small>
+            </div>
+            <div class="style-card-grid" id="styleCards"></div>
+          </section>
+
+          <section class="param-section">
+            <div class="param-group">
+              <div class="param-title"><h4>视频尺寸</h4></div>
+              <div class="param-option-grid compact">
+                <button class="param-option" type="button" data-project-option="aspectRatio" data-value="16:9"><span class="screen-icon wide-screen"></span><strong>16:9</strong></button>
+                <button class="param-option" type="button" data-project-option="aspectRatio" data-value="9:16"><span class="screen-icon tall-screen"></span><strong>9:16</strong></button>
+                <button class="param-option" type="button" data-project-option="aspectRatio" data-value="1:1"><span class="screen-icon square-screen"></span><strong>1:1</strong></button>
+              </div>
+            </div>
+            <div class="param-group">
+              <div class="param-title"><h4>单集影片长度</h4></div>
+              <div class="param-option-grid">
+                <button class="param-option" type="button" data-project-option="videoLength" data-value="智能推荐"><strong>智能推荐</strong></button>
+                <button class="param-option" type="button" data-project-option="videoLength" data-value="长视频>1min"><strong>长视频&gt;1min</strong></button>
+                <button class="param-option" type="button" data-project-option="videoLength" data-value="短视频<1min"><strong>短视频&lt;1min</strong></button>
+              </div>
+            </div>
+            <div class="param-group">
+              <div class="param-title"><h4>字幕</h4></div>
+              <div class="param-option-grid compact">
+                <button class="param-option" type="button" data-project-option="subtitles" data-value="on"><strong>有字幕</strong></button>
+                <button class="param-option" type="button" data-project-option="subtitles" data-value="off"><strong>无字幕</strong></button>
+              </div>
+            </div>
+            <div class="param-group">
+              <div class="param-title"><h4>对白语言</h4></div>
+              <div class="param-option-grid compact">
+                <button class="param-option" type="button" data-project-option="dialogueLanguage" data-value="zh-CN"><strong>中文</strong></button>
+                <button class="param-option" type="button" data-project-option="dialogueLanguage" data-value="en"><strong>英文</strong></button>
+                <button class="param-option" type="button" data-project-option="dialogueLanguage" data-value="ja"><strong>日文</strong></button>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section id="project-assets-block" class="settings-block">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Asset Center</p>
+              <h3>角色 / 场景 / 道具资产</h3>
+            </div>
+            <div class="button-row">
+              <button id="genCardsBtn" class="primary">自动分析资产</button>
+              <button id="genImagesBtn">重新生成资产参考图</button>
+              <button id="finishProjectSetupBtn" type="button">进入剧集制作</button>
+            </div>
+          </div>
+          <div class="asset-tabs" role="tablist" aria-label="资产类型">
+            <button class="asset-tab is-active" type="button" data-asset-tab="character">角色</button>
+            <button class="asset-tab" type="button" data-asset-tab="location">场景</button>
+            <button class="asset-tab" type="button" data-asset-tab="prop">道具</button>
+          </div>
+          <div id="cardsOutput" class="asset-board empty">还没有资产卡。</div>
+        </section>
+
+        <section id="model-settings-block" class="settings-block">
+          <div class="section-head compact">
+            <div>
+              <p class="eyebrow">Model Routing</p>
+              <h3>项目模型选择</h3>
+            </div>
+            <div class="button-row">
+              <button type="button" data-open-model-center>工作台模型中心</button>
+              <button class="primary" type="button" data-save-model-settings>保存模型选择</button>
+            </div>
+          </div>
+          <div class="model-routing-panel">
+            <div class="param-title">
+              <h4>当前项目模型选择</h4>
+              <small>模型配置属于整个工作台；项目里只选择各环节使用哪一个模型和哪一种视频提示词标准。</small>
+            </div>
+            <div class="model-route-grid">
+              <label>剧本 LLM <select form="configForm" data-model-selection="scriptLlm"></select></label>
+              <label>分集续写 LLM <select form="configForm" data-model-selection="episodeScriptLlm"></select></label>
+              <label>分镜 LLM <select form="configForm" data-model-selection="shotLlm"></select></label>
+              <label>资产提取 LLM <select form="configForm" data-model-selection="assetExtractLlm"></select></label>
+              <label>提示词 LLM <select form="configForm" data-model-selection="promptPackageLlm"></select></label>
+              <label>资产生图 <select form="configForm" data-model-selection="assetImageModel"></select></label>
+              <label>故事板生图 <select form="configForm" data-model-selection="storyboardImageModel"></select></label>
+              <label>视频模型 <select form="configForm" data-model-selection="videoModel"></select></label>
+              <label>视频提示词标准 <select form="configForm" data-model-selection="videoProfile"></select></label>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section id="episode-script" class="view-panel">
+        <div class="panel-grid two-col">
+          <article class="panel-card">
+            <div class="section-head compact">
+              <div>
+                <p class="eyebrow">Episode Script</p>
+                <h3 id="currentEpisodeTitle">分集剧本</h3>
+              </div>
+              <button id="saveEpisodeScriptBtn" class="primary">保存分集剧本</button>
+            </div>
+            <label class="script-editor">
+              <span>当前剧集剧本</span>
+              <textarea id="episodeScriptInput" rows="15" placeholder="填写本集剧情。若留空，生成分镜时会临时继承项目剧本。"></textarea>
+            </label>
+            <div id="inheritedAttrs" class="attribute-strip"></div>
+          </article>
+          <article class="panel-card">
+            <div class="section-head compact">
+              <div>
+                <p class="eyebrow">Current Episode</p>
+                <h3>剧本预览</h3>
+              </div>
+            </div>
+            <div id="episodeScriptOutput" class="scene-list empty">请先创建或选择剧集。</div>
+          </article>
+        </div>
+      </section>
+
+      <section id="shot-making" class="view-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Shot Making</p>
+            <h3>分镜制作</h3>
+          </div>
+          <div class="button-row">
+            <button id="genShotsBtn" class="primary">自动生成分镜脚本</button>
+            <button id="genVideosBtn">批量生成 Seedance 提示词</button>
+            <button id="exportPromptPackagesBtn" type="button">导出提示词包</button>
+          </div>
+        </div>
+        <div class="shot-pipeline">
+          <div class="shot-board-head">
+            <span>分镜脚本</span>
+            <span>资产 <small>从脚本中提取</small></span>
+            <span>提示词 <small>Seedance 2.0</small></span>
+            <span>视频</span>
+          </div>
+          <div id="shotsOutput" class="shot-list empty">还没有 15s 分镜。</div>
+        </div>
+      </section>
+
+      <section id="shot-editing" class="view-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Shot Editing</p>
+            <h3>分镜剪辑 / 视频片段</h3>
+          </div>
+          <div class="button-row">
+            <button id="refreshVideoTasksBtn" type="button">刷新任务状态</button>
+            <button id="genVideoClipsBtn" class="primary" type="button">生成视频片段</button>
+            <button data-view="shot-making" type="button">回到分镜制作</button>
+          </div>
+        </div>
+        <div id="videosOutput" class="prompt-package-list empty">视频模型接入后，这里会展示分镜视频片段并支持剪辑。</div>
+      </section>
+
+      <section id="final-output" class="view-panel">
+        <div class="panel-card final-card">
+          <p class="eyebrow">Final Output</p>
+          <h3>输出单集成片</h3>
+          <p class="muted-text">当前可交付物是：当前剧集 15s 分镜脚本、项目资产参考图、Seedance 可用分镜提示词包与已生成的视频片段。单集成片合成会在后续接入剪辑输出流程。</p>
+          <div id="outputSummary" class="output-summary"></div>
+        </div>
+      </section>
+
+    </section>
+  </main>
+
+  <div id="createProjectModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="createProjectTitle">
+    <div class="modal-card">
+      <button id="closeCreateProjectBtn" class="modal-close" aria-label="关闭">×</button>
+      <h2 id="createProjectTitle">创建项目</h2>
+      <form id="createProjectForm" class="create-project-form">
+        <label>
+          <span><b>*</b> 项目名称</span>
+          <input name="title" maxlength="50" autocomplete="off" placeholder="请输入项目名称，如：异世界便利店">
+        </label>
+        <label>
+          <span><b>*</b> 整部短剧剧本</span>
+          <textarea name="scriptText" rows="8" placeholder="粘贴整部短剧剧本，或填写故事梗概。项目创建后可继续扩写、拆集和提取资产。"></textarea>
+        </label>
+        <button class="primary" type="submit">创建项目</button>
+        <small>项目保存在本地 JSON，最近编辑/创建的项目会排在最前。</small>
+      </form>
+    </div>
+  </div>
+
+  <div id="createEpisodeModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="createEpisodeTitle">
+    <div class="modal-card episode-modal-card">
+      <button id="closeCreateEpisodeBtn" class="modal-close" aria-label="关闭">×</button>
+      <h2 id="createEpisodeTitle">添加剧集</h2>
+      <form id="createEpisodeForm" class="create-episode-form">
+        <div class="episode-mode-grid" role="radiogroup" aria-label="剧集创建方式">
+          <label class="mode-choice">
+            <input type="radio" name="generateMode" value="llm" checked>
+            <span><strong>LLM 续写生成</strong><small>根据项目剧本和上一集内容自动生成本集剧本</small></span>
+          </label>
+          <label class="mode-choice">
+            <input type="radio" name="generateMode" value="manual">
+            <span><strong>手动输入</strong><small>直接粘贴本集剧情，保存为本集剧本</small></span>
+          </label>
+          <label class="mode-choice">
+            <input type="radio" name="generateMode" value="blank">
+            <span><strong>空白剧集</strong><small>先创建剧集，后续再填写或生成</small></span>
+          </label>
+        </div>
+        <label>
+          <span>本集剧情目标 / 备注</span>
+          <textarea id="episodeCreateNote" rows="5" placeholder="可选。比如：本集让主角发现世界杯奖杯线索，并在结尾遇到新的对手。手动输入模式下这里就是本集剧本。"></textarea>
+        </label>
+        <small id="episodeCreateHint">分集标题和时长会自动继承项目设置；第 2 集以后会参考上一集结尾续写。</small>
+        <div class="modal-actions">
+          <button id="cancelCreateEpisodeBtn" type="button">取消</button>
+          <button id="createEpisodeSubmitBtn" class="primary" type="submit">创建并生成</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="modelCenterModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="modelCenterTitle">
+    <div class="modal-card model-center-modal-card">
+      <button id="closeModelCenterBtn" class="modal-close" aria-label="关闭">×</button>
+      <div class="events-modal-head">
+        <div>
+          <p class="eyebrow">Workbench Model Center</p>
+          <h2 id="modelCenterTitle">工作台模型中心</h2>
+        </div>
+        <button class="primary" type="button" data-save-model-settings>保存模型配置</button>
+      </div>
+      <div class="model-settings-grid">
+        <fieldset class="model-param-card">
+          <legend>默认 LLM 配置</legend>
+          <label>Provider <select form="configForm" data-adapter="llm" name="provider"><option value="mock">mock</option><option value="openai-compatible">openai-compatible</option></select></label>
+          <label>Endpoint <input form="configForm" data-adapter="llm" name="endpoint" placeholder="https://api.example.com/v1"></label>
+          <label>Model <input form="configForm" data-adapter="llm" name="model" placeholder="model-name"></label>
+          <label>API key <input form="configForm" data-adapter="llm" name="apiKey" type="password" placeholder="已保存则留空"></label>
+          <label>Timeout(ms) <input form="configForm" data-adapter="llm" name="timeoutMs" type="number" min="30000" step="10000" placeholder="180000"></label>
+          <label class="check-row"><input form="configForm" data-adapter="llm" name="fallbackToMock" type="checkbox"> 失败后回退 mock</label>
+        </fieldset>
+        <fieldset class="model-param-card">
+          <legend>默认生图配置</legend>
+          <label>Provider <select form="configForm" data-adapter="image" name="provider"><option value="mock">mock</option><option value="openai-compatible">openai-compatible</option><option value="custom-json">custom-json</option></select></label>
+          <label>Endpoint <input form="configForm" data-adapter="image" name="endpoint" placeholder="https://api.example.com/v1"></label>
+          <label>Model <input form="configForm" data-adapter="image" name="model" placeholder="image-model"></label>
+          <label>API key <input form="configForm" data-adapter="image" name="apiKey" type="password" placeholder="已保存则留空"></label>
+          <label>Timeout(ms) <input form="configForm" data-adapter="image" name="timeoutMs" type="number" min="30000" step="10000" placeholder="300000"></label>
+          <label class="check-row"><input form="configForm" data-adapter="image" name="fallbackToMock" type="checkbox"> 失败后回退 mock</label>
+        </fieldset>
+        <fieldset class="model-param-card">
+          <legend>默认视频配置</legend>
+          <label>Provider <select form="configForm" data-adapter="video" name="provider"><option value="mock">mock</option><option value="apimart-seedance">apimart-seedance</option><option value="custom-json">custom-json</option></select></label>
+          <label>Endpoint <input form="configForm" data-adapter="video" name="endpoint" placeholder="https://api.example.com/video"></label>
+          <label>Model <input form="configForm" data-adapter="video" name="model" placeholder="video-model"></label>
+          <label>API key <input form="configForm" data-adapter="video" name="apiKey" type="password" placeholder="待接入视频模型"></label>
+          <label>Timeout(ms) <input form="configForm" data-adapter="video" name="timeoutMs" type="number" min="30000" step="10000" placeholder="120000"></label>
+          <label class="check-row"><input form="configForm" data-adapter="video" name="fallbackToMock" type="checkbox"> 失败后回退 mock</label>
+        </fieldset>
+      </div>
+    </div>
+  </div>
+
+  <div id="styleModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="styleModalTitle">
+    <div class="modal-card style-modal-card">
+      <button id="closeStyleModalBtn" class="modal-close" aria-label="关闭">×</button>
+      <h2 id="styleModalTitle">添加风格</h2>
+      <form id="styleForm" class="style-form">
+        <input id="styleIdInput" type="hidden">
+        <label class="style-upload-zone">
+          <input id="styleImageFileInput" type="file" accept="image/*">
+          <span class="upload-icon">↑</span>
+          <strong>上传风格参考图</strong>
+          <small id="styleImageFileName">支持本地图片，或在下方粘贴图片地址</small>
+        </label>
+        <label><span><b>*</b> 风格名称</span><input id="styleNameInput" maxlength="50" autocomplete="off" placeholder="请输入风格名称"></label>
+        <label><span>参考图地址</span><input id="styleImageInput" autocomplete="off" placeholder="https://... 或 /cache/images/style.png"></label>
+        <label><span><b>*</b> 风格提示词</span><textarea id="stylePromptInput" maxlength="500" rows="4" placeholder="请输入您希望的风格提示词"></textarea></label>
+        <div class="modal-actions">
+          <button id="cancelStyleBtn" type="button">取消</button>
+          <button id="addStyleBtn" class="primary" type="submit">提交</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="assetModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="assetModalTitle">
+    <div class="modal-card asset-modal-card">
+      <button id="closeAssetModalBtn" class="modal-close" aria-label="关闭">×</button>
+      <h2 id="assetModalTitle">手动添加资产</h2>
+      <form id="assetForm" class="asset-form">
+        <input id="assetIdInput" type="hidden">
+        <input id="assetTypeInput" type="hidden">
+        <input id="assetImageInput" type="hidden">
+        <div class="asset-preview-stack">
+          <div class="asset-preview-panel" id="assetPreviewPanel">暂无图片</div>
+          <div id="assetImageHistory" class="asset-history-strip"></div>
+        </div>
+        <div class="asset-fields">
+          <label><span><b>*</b> 名称</span><input id="assetNameInput" autocomplete="off" placeholder="请输入名称"></label>
+          <label><span>提示词</span><textarea id="assetPromptInput" rows="5" placeholder="请输入资产提示词，若不选择上方参数，则以本提示词为准，可上传图片作为参考"></textarea></label>
+          <label><span>上传参考图</span><input id="assetImageFileInput" type="file" accept="image/png,image/jpeg,image/webp"></label>
+          <small id="assetImageHelp">支持 png、jpg、webp 格式，大小不超过 15MB</small>
+          <label><span>选择模型</span><button class="model-picker" type="button" data-open-model-settings>模型选择 <small data-selected-image-model>未设置</small></button></label>
+          <div class="modal-actions wide-actions">
+            <button id="cancelAssetBtn" type="button">取消</button>
+            <button id="saveAssetBtn" class="primary" type="submit">保存资产</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="promptDetailModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="promptDetailTitle">
+    <div class="modal-card prompt-detail-modal-card">
+      <button id="closePromptDetailModalBtn" class="modal-close" aria-label="关闭">×</button>
+      <div class="prompt-detail-head">
+        <div>
+          <p class="eyebrow">Seedance 2.0 Prompt</p>
+          <h2 id="promptDetailTitle">编辑分镜提示词</h2>
+        </div>
+        <div class="prompt-mode-tabs" aria-label="提示词模式">
+          <button class="is-active" type="button">标准模式</button>
+          <button type="button" disabled>自由模式</button>
+        </div>
+      </div>
+      <div id="promptDetailBody" class="prompt-detail-body"></div>
+      <div class="modal-actions prompt-detail-actions">
+        <button id="promptDetailCopyBtn" type="button">复制 JSON</button>
+        <button id="promptDetailExportBtn" type="button">导出 JSON</button>
+        <button id="promptDetailUseBtn" class="primary" type="button">启用</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="eventsModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="eventsModalTitle">
+    <div class="modal-card events-modal-card">
+      <button id="closeEventsModalBtn" class="modal-close" aria-label="关闭">×</button>
+      <div class="events-modal-head">
+        <div>
+          <p class="eyebrow">Local Cache</p>
+          <h2 id="eventsModalTitle">运行记录</h2>
+        </div>
+        <button id="eventsRefreshBtn" type="button">刷新</button>
+      </div>
+      <div id="eventLog" class="event-log"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

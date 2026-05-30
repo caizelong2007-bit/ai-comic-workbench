@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Local runtime data and secrets
+data/config.json
+data/models.json
+data/projects.json
+data/state.json
+
+# Generated media/cache
+cache/images/*
+cache/videos/*
+*.mp4
+
+# Local logs
+*.log
+server-*.log
+server-*.err.log
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
