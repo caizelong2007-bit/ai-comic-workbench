@@ -384,6 +384,19 @@
     </div>
   </div>
 
+  <div id="confirmDeleteModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="confirmDeleteTitle">
+    <div class="modal-card confirm-modal-card">
+      <button id="closeConfirmDeleteBtn" class="modal-close" aria-label="关闭">脳</button>
+      <p class="eyebrow">Delete Confirm</p>
+      <h2 id="confirmDeleteTitle">确认删除</h2>
+      <div id="confirmDeleteBody" class="confirm-delete-body"></div>
+      <div class="modal-actions">
+        <button id="cancelConfirmDeleteBtn" type="button">取消</button>
+        <button id="confirmDeleteBtn" class="danger danger-fill" type="button">删除</button>
+      </div>
+    </div>
+  </div>
+
   <div id="modelCenterModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="modelCenterTitle">
     <div class="modal-card model-center-modal-card">
       <button id="closeModelCenterBtn" class="modal-close" aria-label="关闭">×</button>

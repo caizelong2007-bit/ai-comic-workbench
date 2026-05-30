@@ -45,6 +45,7 @@ let serverJobPollTimer = null;
 let serverJobPollInFlight = false;
 let videoTaskPollTimer = null;
 let videoTaskPollInFlight = false;
+let pendingDelete = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -75,6 +76,12 @@ function bindElements() {
     "episodeCreateNote",
     "episodeCreateHint",
     "createEpisodeSubmitBtn",
+    "confirmDeleteModal",
+    "closeConfirmDeleteBtn",
+    "cancelConfirmDeleteBtn",
+    "confirmDeleteBtn",
+    "confirmDeleteTitle",
+    "confirmDeleteBody",
     "modelCenterModal",
     "closeModelCenterBtn",
     "styleModal",
@@ -180,6 +187,12 @@ function bindEvents() {
   });
   els.createEpisodeForm.addEventListener("submit", createEpisodeFromForm);
   els.createEpisodeForm.addEventListener("change", updateCreateEpisodeMode);
+  els.closeConfirmDeleteBtn.addEventListener("click", closeConfirmDeleteModal);
+  els.cancelConfirmDeleteBtn.addEventListener("click", closeConfirmDeleteModal);
+  els.confirmDeleteBtn.addEventListener("click", confirmPendingDelete);
+  els.confirmDeleteModal.addEventListener("click", (event) => {
+    if (event.target === els.confirmDeleteModal) closeConfirmDeleteModal();
+  });
   els.closeModelCenterBtn.addEventListener("click", closeModelCenterModal);
   els.modelCenterModal.addEventListener("click", (event) => {
     if (event.target === els.modelCenterModal) closeModelCenterModal();
@@ -257,6 +270,12 @@ function bindEvents() {
   });
 
   els.episodeList.addEventListener("click", (event) => {
+    const deleteButton = event.target.closest("[data-delete-episode]");
+    if (deleteButton) {
+      event.stopPropagation();
+      openDeleteEpisodeConfirm(deleteButton.dataset.deleteEpisode);
+      return;
+    }
     const episodeButton = event.target.closest("[data-open-episode]");
     if (episodeButton) openEpisode(episodeButton.dataset.openEpisode);
   });
@@ -317,6 +336,11 @@ function bindEvents() {
       openAssetModal({ id: editButton.dataset.editAsset });
       return;
     }
+    const deleteButton = event.target.closest("[data-delete-asset]");
+    if (deleteButton) {
+      openDeleteAssetConfirm(deleteButton.dataset.deleteAsset);
+      return;
+    }
   });
   els.videosOutput.addEventListener("click", (event) => {
     const viewButton = event.target.closest("[data-view]");
@@ -367,6 +391,12 @@ function bindEvents() {
     if (settingsButton) {
       event.stopPropagation();
       openProject(settingsButton.dataset.projectSettings, { mode: "settings", tab: "project-script-block" });
+      return;
+    }
+    const deleteButton = event.target.closest("[data-delete-project]");
+    if (deleteButton) {
+      event.stopPropagation();
+      openDeleteProjectConfirm(deleteButton.dataset.deleteProject);
       return;
     }
     const projectCard = event.target.closest("[data-open-project]");
@@ -695,6 +725,116 @@ async function openEpisode(episodeId) {
     setActiveView("episode-script");
     toast("剧集已切换");
   }, "切换剧集失败");
+}
+
+function openDeleteProjectConfirm(projectId) {
+  const project = (current.projects || []).find((item) => item.id === projectId);
+  if (!project) {
+    toast("项目不存在或已删除");
+    return;
+  }
+  pendingDelete = { type: "project", id: projectId };
+  els.confirmDeleteTitle.textContent = "删除项目";
+  els.confirmDeleteBtn.textContent = "删除项目";
+  els.confirmDeleteBody.innerHTML = `
+    <p>删除后将移除该项目的剧本、资产、分集、提示词和视频任务记录，并清理不再被引用的本地缓存文件。</p>
+    <dl class="delete-summary">
+      <div><dt>项目</dt><dd>${escapeHtml(displayProjectTitle(project))}</dd></div>
+      <div><dt>分集</dt><dd>${escapeHtml(project.stats?.episodes || 0)} 集</dd></div>
+      <div><dt>资产</dt><dd>${escapeHtml(project.stats?.assets || 0)} 个</dd></div>
+      <div><dt>分镜</dt><dd>${escapeHtml(project.stats?.shots || 0)} 个</dd></div>
+      <div><dt>提示词包</dt><dd>${escapeHtml(project.stats?.promptPackages || 0)} 个</dd></div>
+      <div><dt>更新时间</dt><dd>${escapeHtml(formatTime(project.updatedAt || project.createdAt))}</dd></div>
+    </dl>
+  `;
+  els.confirmDeleteModal.classList.remove("is-hidden");
+}
+
+function openDeleteEpisodeConfirm(episodeId) {
+  const episode = (current.state?.episodes || []).find((item) => item.id === episodeId);
+  if (!episode) {
+    toast("剧集不存在或已删除");
+    return;
+  }
+  pendingDelete = { type: "episode", id: episodeId };
+  els.confirmDeleteTitle.textContent = "删除剧集";
+  els.confirmDeleteBtn.textContent = "删除剧集";
+  els.confirmDeleteBody.innerHTML = `
+    <p>删除后将移除该剧集的剧本、分镜、提示词包和视频任务记录。项目资产库不会被删除。</p>
+    <dl class="delete-summary">
+      <div><dt>剧集</dt><dd>${escapeHtml(episode.title || episode.id)}</dd></div>
+      <div><dt>分镜</dt><dd>${escapeHtml((episode.shots || []).length)} 个</dd></div>
+      <div><dt>提示词包</dt><dd>${escapeHtml((episode.promptPackages || []).length)} 个</dd></div>
+      <div><dt>视频任务</dt><dd>${escapeHtml((episode.videos || []).length)} 个</dd></div>
+      <div><dt>更新时间</dt><dd>${escapeHtml(formatTime(episode.updatedAt || episode.createdAt))}</dd></div>
+    </dl>
+  `;
+  els.confirmDeleteModal.classList.remove("is-hidden");
+}
+
+function openDeleteAssetConfirm(assetId) {
+  const asset = findClientAsset(assetId);
+  if (!asset) {
+    toast("资产不存在或已删除");
+    return;
+  }
+  const usage = assetUsageSummary(assetId);
+  pendingDelete = { type: "asset", id: assetId };
+  els.confirmDeleteTitle.textContent = "删除资产";
+  els.confirmDeleteBtn.textContent = "删除资产";
+  els.confirmDeleteBody.innerHTML = `
+    <p>删除后将移除资产卡、当前图和历史图，并从分镜/提示词包中移除引用；已生成且引用该资产的视频会标记为需要重新生成。</p>
+    <dl class="delete-summary">
+      <div><dt>资产</dt><dd>${escapeHtml(asset.name || asset.id)}</dd></div>
+      <div><dt>类型</dt><dd>${escapeHtml(assetTypeLabel(asset.type))}</dd></div>
+      <div><dt>历史图</dt><dd>${escapeHtml(usage.historyCount)} 张</dd></div>
+      <div><dt>引用分镜</dt><dd>${escapeHtml(usage.shots)} 个</dd></div>
+      <div><dt>引用提示词</dt><dd>${escapeHtml(usage.packages)} 个</dd></div>
+      <div><dt>引用视频</dt><dd>${escapeHtml(usage.videos)} 个</dd></div>
+    </dl>
+  `;
+  els.confirmDeleteModal.classList.remove("is-hidden");
+}
+
+function closeConfirmDeleteModal() {
+  pendingDelete = null;
+  els.confirmDeleteModal.classList.add("is-hidden");
+  els.confirmDeleteBody.innerHTML = "";
+}
+
+async function confirmPendingDelete() {
+  if (!pendingDelete) return;
+  const target = pendingDelete;
+  const labels = { project: "项目", episode: "剧集", asset: "资产" };
+  await withBusy(`delete:${target.type}:${target.id}`, async () => {
+    const data = await api.post(deleteEndpoint(target.type), deletePayload(target));
+    applyServerData(data);
+    closeConfirmDeleteModal();
+    render();
+    if (target.type === "project") {
+      showProjectHome();
+    } else if (target.type === "episode") {
+      setStudioMode("episodes");
+      setActiveView("episode-script");
+    } else if (target.type === "asset") {
+      setAssetTab(current.activeAssetTab);
+    }
+    toast(`${labels[target.type] || "内容"}已删除${data.removedFiles?.length ? `，清理缓存 ${data.removedFiles.length} 个` : ""}`);
+  }, `删除${labels[target.type] || "内容"}失败`);
+}
+
+function deleteEndpoint(type) {
+  return {
+    project: "/api/projects/delete",
+    episode: "/api/episodes/delete",
+    asset: "/api/assets/delete"
+  }[type];
+}
+
+function deletePayload(target) {
+  if (target.type === "project") return { projectId: target.id };
+  if (target.type === "episode") return { episodeId: target.id };
+  return { assetId: target.id };
 }
 
 function showProjectHome() {
@@ -2144,7 +2284,10 @@ function renderProjects() {
         <div class="project-card-body">
           <div class="project-card-title">
             <h3>${escapeHtml(displayProjectTitle(project))}</h3>
-            <button class="mini-action" data-project-settings="${escapeAttr(project.id)}" aria-label="项目设置">设置</button>
+            <div class="card-action-row">
+              <button class="mini-action" data-project-settings="${escapeAttr(project.id)}" aria-label="项目设置">设置</button>
+              <button class="mini-action danger" data-delete-project="${escapeAttr(project.id)}" aria-label="删除项目">删除</button>
+            </div>
           </div>
           <p>${escapeHtml(project.scriptText || "暂无剧本摘要")}</p>
           <div class="meta-line">
@@ -2167,8 +2310,11 @@ function renderSidebar(state, episode) {
   const episodes = state.episodes || [];
   els.episodeList.innerHTML = episodes.length ? episodes.map((item) => `
     <button class="episode-tab ${item.id === state.activeEpisodeId ? "is-active" : ""}" data-open-episode="${escapeAttr(item.id)}">
-      <strong>${escapeHtml(item.title)}</strong>
-      <small>${episodeStatusText(item)}</small>
+      <span class="episode-tab-main">
+        <strong>${escapeHtml(item.title)}</strong>
+        <small>${episodeStatusText(item)}</small>
+      </span>
+      <span class="episode-delete" data-delete-episode="${escapeAttr(item.id)}" aria-label="删除剧集">删除</span>
     </button>
   `).join("") : `<p class="empty mini-empty">${projectSetupComplete() ? "暂无剧集，点击上方添加剧集。" : "完善项目后可添加剧集。"}</p>`;
 }
@@ -2382,7 +2528,10 @@ function renderCards(cards) {
           <div class="asset-thumb-body">
             <strong>${escapeHtml(asset.name || asset.id)}</strong>
             <small>${escapeHtml(asset.prompt || asset.description || "未填写提示词")}</small>
-            <button class="mini-action" type="button" data-generate-asset="${escapeAttr(asset.id)}" data-job-key="${escapeAttr(assetJobKey(asset.id))}" data-idle-text="${imageUrl ? "重新生成" : "生成参考图"}" data-loading-text="生成中..." ${running ? "disabled" : ""}>${running ? "生成中..." : imageUrl ? "重新生成" : "生成参考图"}</button>
+            <div class="card-action-row">
+              <button class="mini-action" type="button" data-generate-asset="${escapeAttr(asset.id)}" data-job-key="${escapeAttr(assetJobKey(asset.id))}" data-idle-text="${imageUrl ? "重新生成" : "生成参考图"}" data-loading-text="生成中..." ${running ? "disabled" : ""}>${running ? "生成中..." : imageUrl ? "重新生成" : "生成参考图"}</button>
+              <button class="mini-action danger" type="button" data-delete-asset="${escapeAttr(asset.id)}">删除</button>
+            </div>
           </div>
         </article>
       `;
@@ -2904,6 +3053,33 @@ function clientAssetCatalog(cards = current.state?.cards || {}) {
 
 function findClientAsset(id) {
   return clientAssetCatalog().find((asset) => asset.id === id) || null;
+}
+
+function assetUsageSummary(assetId) {
+  const episodes = current.state?.episodes || [];
+  const historyCount = (current.state?.assetImageHistory?.[assetId] || []).length;
+  let shots = 0;
+  let packages = 0;
+  let videos = 0;
+  for (const episode of episodes) {
+    shots += (episode.shots || []).filter((shot) => (shot.assetRefs || []).includes(assetId)).length;
+    packages += (episode.promptPackages || []).filter((pack) => promptPackageUsesAsset(pack, assetId)).length;
+    videos += (episode.videos || []).filter((video) => videoUsesAsset(video, assetId)).length;
+  }
+  return { historyCount, shots, packages, videos };
+}
+
+function promptPackageUsesAsset(pack = {}, assetId = "") {
+  return (pack.assetRefs || []).includes(assetId)
+    || (pack.assetReferences || []).some((asset) => asset.id === assetId)
+    || (pack.audio || []).some((row) => (row.assetRefs || []).includes(assetId))
+    || (pack.dialogue || []).some((row) => row.speakerAssetId === assetId)
+    || (pack.subShots || []).some((subShot) => (subShot.assetRefs || []).includes(assetId));
+}
+
+function videoUsesAsset(video = {}, assetId = "") {
+  return (video.referenceImages || []).some((image) => image.id === assetId)
+    || String(video.prompt || "").includes(assetId);
 }
 
 function projectStyleOptions(project = {}) {

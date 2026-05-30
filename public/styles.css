@@ -55,12 +55,26 @@ button.is-loading { cursor: wait; }
   border-color: rgba(180, 35, 24, .32);
 }
 
+.danger-fill {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+  font-weight: 800;
+}
+
 .mini-action {
   min-height: 30px;
   padding: 4px 9px;
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
+}
+
+.card-action-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .app-header {
@@ -368,11 +382,17 @@ button.is-loading { cursor: wait; }
 
 .episode-tab {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 3px;
   width: 100%;
   min-height: 54px;
   text-align: left;
   background: #fff;
+}
+
+.episode-tab-main {
+  min-width: 0;
 }
 
 .episode-tab strong,
@@ -391,6 +411,21 @@ button.is-loading { cursor: wait; }
   border-color: rgba(15, 139, 141, .42);
   background: #eefafa;
   box-shadow: 0 9px 24px rgba(15, 139, 141, .12);
+}
+
+.episode-delete {
+  align-self: center;
+  justify-self: end;
+  padding: 3px 7px;
+  border: 1px solid rgba(180, 35, 24, .24);
+  border-radius: 6px;
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.episode-delete:hover {
+  background: #fff4f2;
 }
 
 .mini-empty {
@@ -1071,6 +1106,14 @@ legend {
   min-height: 28px;
   padding: 3px 6px;
   font-size: 12px;
+}
+
+.asset-thumb-body .card-action-row {
+  justify-content: space-between;
+}
+
+.asset-thumb-body .card-action-row .mini-action {
+  flex: 1;
 }
 
 .prompt-box {
@@ -1920,6 +1963,50 @@ legend {
 
 .episode-modal-card {
   width: min(620px, 100%);
+}
+
+.confirm-modal-card {
+  width: min(560px, 100%);
+}
+
+.confirm-delete-body {
+  display: grid;
+  gap: 12px;
+  color: var(--muted);
+}
+
+.confirm-delete-body p {
+  margin: 0;
+}
+
+.delete-summary {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--soft);
+}
+
+.delete-summary div {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.delete-summary dt {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.delete-summary dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--ink);
+  font-weight: 800;
+  word-break: break-word;
 }
 
 .create-episode-form {
