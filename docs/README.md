@@ -10,6 +10,7 @@
 - [模型与提示词](./model-and-prompt-flow.md)：说明 LLM、生图、视频模型分别在何处调用，以及提示词包如何进入 Seedance。
 - [数据与缓存](./data-storage.md)：说明本地 JSON、缓存目录、运行记录和敏感配置的管理方式。
 - [运行与版本管理](./operations-and-release.md)：说明本地启动、Git 基线、发布/交付注意事项。
+- [开发流程标准](./development-workflow.md)：说明 master、dev、feature、fix 分支的使用规则和发布节奏。
 
 ## v1.0 管理原则
 
