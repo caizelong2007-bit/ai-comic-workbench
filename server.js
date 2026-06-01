@@ -777,14 +777,12 @@ function mergePromptPackageEdits(currentPack = {}, patch = {}, validAssetIds = n
     return {
       ...row,
       content: editableString(next.content, row.content || ""),
-      assetRefs: filterAssetRefs(next.assetRefs || next.asset_refs || row.assetRefs || [], validAssetIds)
+      assetRefs: filterAssetRefs(readPatchArray(next, "assetRefs", "asset_refs", row.assetRefs || []), validAssetIds)
     };
   });
   const dialogue = (currentPack.dialogue || []).map((row, index) => {
     const next = dialoguePatch[index] || {};
-    const speakerAssetId = validAssetIds.has(next.speakerAssetId)
-      ? next.speakerAssetId
-      : validAssetIds.has(next.speaker_asset_id) ? next.speaker_asset_id : row.speakerAssetId || "";
+    const speakerAssetId = readPatchAssetId(next, "speakerAssetId", "speaker_asset_id", row.speakerAssetId || "", validAssetIds);
     return {
       ...row,
       speakerAssetId,
@@ -800,11 +798,11 @@ function mergePromptPackageEdits(currentPack = {}, patch = {}, validAssetIds = n
       blocking: editableString(next.blocking, subShot.blocking || ""),
       composition: editableString(next.composition, subShot.composition || ""),
       action: editableString(next.action, subShot.action || ""),
-      assetRefs: filterAssetRefs(next.assetRefs || next.asset_refs || subShot.assetRefs || [], validAssetIds)
+      assetRefs: filterAssetRefs(readPatchArray(next, "assetRefs", "asset_refs", subShot.assetRefs || []), validAssetIds)
     };
   });
   const assetRefs = filterAssetRefs([
-    ...(patch.assetRefs || patch.asset_refs || []),
+    ...readPatchArray(patch, "assetRefs", "asset_refs", []),
     ...audio.flatMap((row) => row.assetRefs || []),
     ...dialogue.map((row) => row.speakerAssetId).filter(Boolean),
     ...subShots.flatMap((subShot) => subShot.assetRefs || [])
@@ -824,7 +822,135 @@ function mergePromptPackageEdits(currentPack = {}, patch = {}, validAssetIds = n
 }
 
 function editableString(value, fallback = "") {
-  return Object.prototype.hasOwnProperty.call({ value }, "value") && typeof value === "string" ? value.trim() : String(fallback || "");
+  const source = Object.prototype.hasOwnProperty.call({ value }, "value") && typeof value === "string" ? value : String(fallback || "");
+  return cleanPromptSerializedTokens(source).trim();
+}
+
+function cleanPromptSerializedTokens(text = "") {
+  const source = String(text || "");
+  const fragments = parsePromptSerializedFragments(source);
+  if (!fragments.length) return source;
+  const pieces = [];
+  let cursor = 0;
+  for (const fragment of fragments) {
+    if (fragment.index < cursor) continue;
+    pieces.push(source.slice(cursor, fragment.index));
+    pieces.push(fragment.items.map((item) => `@${item.id}${item.name && item.name !== item.id ? ` ${item.name}` : ""}`).join(" "));
+    cursor = fragment.index + fragment.length;
+  }
+  pieces.push(source.slice(cursor));
+  return pieces.join("");
+}
+
+function parsePromptSerializedFragments(text = "") {
+  const source = String(text || "");
+  const fragments = [];
+  let index = 0;
+  while (index < source.length) {
+    if (source.startsWith("[[", index)) {
+      const end = source.indexOf("]]", index + 2);
+      if (end >= 0) {
+        const raw = source.slice(index, end + 2);
+        const items = parsePromptSerializedItems(source.slice(index + 2, end));
+        if (items.length) {
+          fragments.push({ index, raw, length: raw.length, items });
+          index = end + 2;
+          continue;
+        }
+      }
+    }
+    if (source[index] === "[" || source[index] === "{") {
+      const end = findPromptJsonFragmentEnd(source, index);
+      if (end > index) {
+        const raw = source.slice(index, end);
+        const items = parsePromptSerializedItems(raw);
+        if (items.length) {
+          fragments.push({ index, raw, length: raw.length, items });
+          index = end;
+          continue;
+        }
+      }
+    }
+    index += 1;
+  }
+  return fragments;
+}
+
+function parsePromptSerializedItems(value = "") {
+  const source = String(value || "");
+  let data;
+  try {
+    data = JSON.parse(source);
+  } catch {
+    const unescaped = source.replace(/\\"/g, "\"");
+    if (unescaped === source) return [];
+    try {
+      data = JSON.parse(unescaped);
+    } catch {
+      return [];
+    }
+  }
+  const rows = Array.isArray(data) ? data : [data];
+  return rows.map((item) => {
+    if (!item || typeof item !== "object") return null;
+    const id = String(item.id || item.value || "").trim();
+    if (!id) return null;
+    if (!item.name && !item.type && !item.imageUrl) return null;
+    return {
+      id,
+      name: String(item.name || id).trim()
+    };
+  }).filter(Boolean);
+}
+
+function findPromptJsonFragmentEnd(source = "", start = 0) {
+  const opener = source[start];
+  if (opener !== "[" && opener !== "{") return -1;
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "[" || char === "{") {
+      stack.push(char);
+      continue;
+    }
+    if (char !== "]" && char !== "}") continue;
+    const expected = char === "]" ? "[" : "{";
+    if (stack.pop() !== expected) return -1;
+    if (!stack.length) return index + 1;
+  }
+  return -1;
+}
+
+function readPatchArray(source = {}, camelKey, snakeKey, fallback = []) {
+  if (Object.prototype.hasOwnProperty.call(source, camelKey)) return Array.isArray(source[camelKey]) ? source[camelKey] : [];
+  if (Object.prototype.hasOwnProperty.call(source, snakeKey)) return Array.isArray(source[snakeKey]) ? source[snakeKey] : [];
+  return fallback;
+}
+
+function readPatchAssetId(source = {}, camelKey, snakeKey, fallback = "", validAssetIds = new Set()) {
+  if (Object.prototype.hasOwnProperty.call(source, camelKey)) {
+    return validAssetIds.has(source[camelKey]) ? source[camelKey] : "";
+  }
+  if (Object.prototype.hasOwnProperty.call(source, snakeKey)) {
+    return validAssetIds.has(source[snakeKey]) ? source[snakeKey] : "";
+  }
+  return validAssetIds.has(fallback) ? fallback : "";
 }
 
 async function doGeneratePromptPackages(payload = {}) {
@@ -1325,7 +1451,7 @@ function normalizeSeedanceReferenceImages(referenceImages = []) {
 }
 
 function buildSeedanceVideoPrompt(config, pack = {}, shot = {}, assets = [], assetImages = []) {
-  const refs = pack.assetRefs?.length ? pack.assetRefs : [...new Set((pack.subShots || []).flatMap((subShot) => subShot.assetRefs || []))];
+  const refs = savedPromptAssetRefs(pack);
   const references = assetReferencesForRefs(refs, assets, assetImages);
   const audio = pack.audio || [];
   const dialogue = pack.dialogue || [];
@@ -1357,7 +1483,7 @@ function buildSeedanceVideoPrompt(config, pack = {}, shot = {}, assets = [], ass
 }
 
 async function prepareSeedanceReferenceImages(adapter, pack = {}, assets = [], assetImages = []) {
-  const refs = pack.assetRefs?.length ? pack.assetRefs : [...new Set((pack.subShots || []).flatMap((subShot) => subShot.assetRefs || []))];
+  const refs = savedPromptAssetRefs(pack);
   const references = assetReferencesForRefs(refs, assets, assetImages)
     .filter((asset) => asset.imageUrl)
     .slice(0, MAX_SHOT_ASSET_REFS);
@@ -3085,15 +3211,23 @@ function assetReferencesForRefs(refs, assets, assetImages) {
 function hydratePromptPackageReferences(packages, cards, assetImages) {
   const assets = flattenCards(cards);
   return (packages || []).map((pack) => {
-    const refs = pack.assetRefs?.length
-      ? pack.assetRefs
-      : [...new Set((pack.subShots || []).flatMap((subShot) => subShot.assetRefs || []))];
+    const refs = savedPromptAssetRefs(pack);
     return {
       ...pack,
       assetRefs: refs,
     assetReferences: assetReferencesForRefs(refs, assets, assetImages)
     };
   });
+}
+
+function savedPromptAssetRefs(pack = {}) {
+  if (Array.isArray(pack.assetRefs)) return filterUniqueStrings(pack.assetRefs);
+  if (Array.isArray(pack.asset_refs)) return filterUniqueStrings(pack.asset_refs);
+  return filterUniqueStrings((pack.subShots || []).flatMap((subShot) => subShot.assetRefs || subShot.asset_refs || []));
+}
+
+function filterUniqueStrings(values = []) {
+  return [...new Set((Array.isArray(values) ? values : []).map((value) => String(value || "").trim()).filter(Boolean))];
 }
 
 function activeVideoProfile(config = {}) {
@@ -3120,7 +3254,7 @@ function buildSeedancePromptFromParts(shot, assetRefs, assets, assetImages) {
 }
 
 function buildSeedancePromptFromPackage(pack, shot, assets, assetImages) {
-  const refs = pack.assetRefs?.length ? pack.assetRefs : [...new Set((pack.subShots || []).flatMap((subShot) => subShot.assetRefs || []))];
+  const refs = savedPromptAssetRefs(pack);
   return [
     buildSeedancePromptFromParts(shot, refs, assets, assetImages),
     `Sound: ${pack.soundDesign || ""}`,

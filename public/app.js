@@ -226,27 +226,15 @@ function bindEvents() {
       setPromptSubshotTab(subshotTab.dataset.subshotTab);
       return;
     }
-    const assetOption = event.target.closest("[data-prompt-asset-option]");
-    if (assetOption) {
-      insertPromptAsset(assetOption.dataset.promptAssetOption);
-      return;
-    }
-    const assetRemove = event.target.closest("[data-remove-prompt-asset]");
-    if (assetRemove) {
-      removePromptAsset(assetRemove.dataset.removePromptAsset);
-      return;
-    }
-    const assetTab = event.target.closest("[data-prompt-asset-tab]");
-    if (assetTab) {
-      setPromptAssetPickerTab(assetTab.dataset.promptAssetTab);
-      return;
-    }
     const previewToggle = event.target.closest("[data-toggle-request-preview]");
     if (previewToggle) {
       togglePromptRequestPreview();
+      return;
     }
   });
   els.promptDetailBody.addEventListener("input", handlePromptEditorInput);
+  els.promptDetailBody.addEventListener("focusin", handlePromptEditorFocusIn);
+  els.promptDetailBody.addEventListener("focusout", handlePromptEditorFocusOut);
   els.promptDetailCopyBtn.addEventListener("click", () => copyPromptPackage(els.promptDetailCopyBtn.dataset.copyPrompt));
   els.promptDetailExportBtn.addEventListener("click", () => exportPromptPackage(els.promptDetailExportBtn.dataset.exportPrompt));
   els.promptDetailUseBtn.addEventListener("click", savePromptPackageEdits);
@@ -1035,6 +1023,7 @@ function openPromptDetailModal(packageId) {
   const shot = (getActiveEpisode()?.shots || []).find((item) => item.id === pack.shotId) || {};
   promptEditor = createPromptEditorState(pack, shot);
   els.promptDetailBody.innerHTML = renderPromptDetail(pack, shot);
+  attachPromptMentionEditors();
   els.promptDetailCopyBtn.dataset.copyPrompt = pack.id;
   els.promptDetailExportBtn.dataset.exportPrompt = pack.id;
   els.promptDetailUseBtn.textContent = "保存修改";
@@ -1042,6 +1031,7 @@ function openPromptDetailModal(packageId) {
 }
 
 function closePromptDetailModal() {
+  detachPromptMentionEditors();
   els.promptDetailModal.classList.add("is-hidden");
   els.promptDetailBody.innerHTML = "";
   els.promptDetailCopyBtn.dataset.copyPrompt = "";
@@ -1076,8 +1066,9 @@ function createPromptEditorState(pack = {}, shot = {}) {
     packageId: pack.id,
     episodeId: getActiveEpisode()?.id || "",
     shotId: pack.shotId || shot.id || "",
-    pickerTarget: null,
-    pickerType: "character",
+    tagifyFields: [],
+    attachedFields: [],
+    manualEdited: Boolean(pack.manualEditedAt),
     showRequestPreview: false,
     assetCatalog: clientAssetCatalog(),
     selectedRefs: new Set(referenceAssets.map((asset) => asset.id))
@@ -1085,142 +1076,181 @@ function createPromptEditorState(pack = {}, shot = {}) {
 }
 
 function handlePromptEditorInput(event) {
-  const field = event.target.closest("[data-prompt-field]");
+  const field = event.target.closest("[data-prompt-editor]");
   if (!field || !promptEditor) return;
   updatePromptReferenceCounter();
-  if (event.data === "@" || promptFieldText(field).endsWith("@")) {
-    openPromptAssetPicker(field);
-  }
 }
 
-function openPromptAssetPicker(field) {
-  if (!promptEditor) return;
-  promptEditor.pickerTarget = field.dataset.promptField;
-  promptEditor.pickerType = "character";
-  renderPromptAssetPicker(field);
+function handlePromptEditorFocusIn(event) {
+  const field = event.target.closest("[data-prompt-editor]");
+  if (!field || !promptEditor) return;
+  const row = field.closest(".prompt-edit-row");
+  if (row) row.classList.add("is-editing");
 }
 
-function renderPromptAssetPicker(field) {
-  const existing = els.promptDetailBody.querySelector(".prompt-asset-picker");
-  if (existing) existing.remove();
-  const picker = document.createElement("div");
-  picker.className = "prompt-asset-picker";
-  picker.innerHTML = renderPromptAssetPickerContent(promptEditor?.pickerType || "character");
-  field.closest(".prompt-edit-row")?.appendChild(picker);
-}
-
-function renderPromptAssetPickerContent(activeType = "character") {
-  const types = [["character", "角色"], ["location", "场景"], ["prop", "道具"]];
-  const assets = (promptEditor?.assetCatalog || []).filter((asset) => normalizeAssetType(asset.type) === normalizeAssetType(activeType));
-  return `
-    <div class="prompt-picker-tabs">
-      ${types.map(([type, label]) => `<button class="${normalizeAssetType(activeType) === type ? "is-active" : ""}" type="button" data-prompt-asset-tab="${escapeAttr(type)}">${escapeHtml(label)}</button>`).join("")}
-    </div>
-    <div class="prompt-picker-list">
-      ${assets.map((asset) => `
-        <button type="button" data-prompt-asset-option="${escapeAttr(asset.id)}">
-          ${asset.imageUrl ? `<img src="${escapeAttr(asset.imageUrl)}" alt="${escapeAttr(asset.name || asset.id)}">` : `<span>${escapeHtml((asset.name || asset.id || "?").slice(0, 1))}</span>`}
-          <b>${escapeHtml(asset.name || asset.id)}</b>
-        </button>
-      `).join("") || `<p>暂无${escapeHtml(assetTypeLabel(activeType))}资产</p>`}
-    </div>
-  `;
-}
-
-function setPromptAssetPickerTab(type) {
-  if (!promptEditor) return;
-  promptEditor.pickerType = normalizeAssetType(type);
-  const picker = els.promptDetailBody.querySelector(".prompt-asset-picker");
-  if (picker) picker.innerHTML = renderPromptAssetPickerContent(promptEditor.pickerType);
-}
-
-function insertPromptAsset(assetId) {
-  if (!promptEditor?.pickerTarget || !assetId) return;
-  const field = promptFieldByKey(promptEditor.pickerTarget);
-  const asset = findClientAsset(assetId);
-  if (!field || !asset) return;
-  insertPromptAssetToken(field, asset);
-  promptEditor.selectedRefs.add(assetId);
-  field.focus();
-  els.promptDetailBody.querySelector(".prompt-asset-picker")?.remove();
-  updatePromptReferenceCounter();
-}
-
-function removePromptAsset(target) {
-  const token = els.promptDetailBody.querySelector(`[data-token-id="${escapeSelector(target || "")}"]`);
-  token?.remove();
-  updatePromptReferenceCounter();
-}
-
-function promptFieldByKey(key) {
-  return [...els.promptDetailBody.querySelectorAll("[data-prompt-field]")]
-    .find((field) => field.dataset.promptField === key) || null;
+function handlePromptEditorFocusOut(event) {
+  const field = event.target.closest("[data-prompt-editor]");
+  if (!field || !promptEditor) return;
+  window.setTimeout(() => {
+    const row = field.closest(".prompt-edit-row");
+    if (row && document.activeElement !== field) row.classList.remove("is-editing");
+    updatePromptMentionPreview(field);
+  }, 0);
 }
 
 function promptFieldRefs(field) {
-  const inlineRefs = [...(field?.querySelectorAll?.("[data-asset-token]") || [])].map((node) => node.dataset.assetId).filter(Boolean);
-  return uniqueAssetIds(inlineRefs);
+  return uniqueAssetIds(parsePromptMentions(field?.value || "").map((item) => item.id));
 }
 
 function promptFieldText(field) {
   if (!field) return "";
-  const clone = field.cloneNode(true);
-  clone.querySelectorAll("[data-asset-token]").forEach((token) => {
-    token.replaceWith(`@${token.dataset.assetId || ""} ${token.dataset.assetName || token.textContent || ""}`);
-  });
-  return clone.textContent.trim();
+  return decodePromptMentionText(field.value || "").trim();
 }
 
-function insertPromptAssetToken(field, asset) {
-  removeTrailingAtBeforeCursor(field);
-  const token = document.createElement("span");
-  token.className = "prompt-inline-token";
-  token.contentEditable = "false";
-  token.dataset.assetToken = "true";
-  token.dataset.assetId = asset.id;
-  token.dataset.assetName = asset.name || asset.id;
-  token.dataset.tokenId = `${field.dataset.promptField}||${asset.id}||${Date.now()}`;
-  token.innerHTML = renderPromptInlineTokenInner(asset, token.dataset.tokenId);
-  const space = document.createTextNode(" ");
-  const selection = window.getSelection();
-  if (selection?.rangeCount) {
-    const range = selection.getRangeAt(0);
-    range.deleteContents();
-    range.insertNode(space);
-    range.insertNode(token);
-    range.setStartAfter(space);
-    range.setEndAfter(space);
-    selection.removeAllRanges();
-    selection.addRange(range);
-  } else {
-    field.append(token, space);
+function attachPromptMentionEditors() {
+  if (!promptEditor) return;
+  const fields = [...els.promptDetailBody.querySelectorAll("[data-prompt-editor]")];
+  promptEditor.attachedFields = fields;
+  fields.forEach(updatePromptMentionPreview);
+  if (typeof Tribute === "undefined") {
+    toast("提示词 @ 选择器库未加载");
+    return;
+  }
+  promptEditor.tribute = new Tribute({
+    trigger: "@",
+    values: promptMentionValues(),
+    lookup: (item) => item.lookup,
+    fillAttr: "insertText",
+    requireLeadingSpace: false,
+    allowSpaces: true,
+    replaceTextSuffix: "",
+    menuItemTemplate: (item) => renderPromptMentionMenuItem(item.original),
+    selectTemplate: (item) => item?.original?.insertText || ""
+  });
+  promptEditor.tribute.attach(fields);
+  fields.forEach((field) => {
+    field.addEventListener("tribute-replaced", () => {
+      updatePromptMentionPreview(field);
+      updatePromptReferenceCounter();
+    });
+  });
+}
+
+function detachPromptMentionEditors() {
+  if (promptEditor?.tribute && promptEditor.attachedFields?.length) {
+    promptEditor.tribute.detach(promptEditor.attachedFields);
   }
 }
 
-function removeTrailingAtBeforeCursor(field) {
-  const selection = window.getSelection();
-  if (!selection?.rangeCount) return;
-  const range = selection.getRangeAt(0);
-  if (!field.contains(range.startContainer) || range.startContainer.nodeType !== Node.TEXT_NODE || range.startOffset < 1) return;
-  const text = range.startContainer.textContent || "";
-  if (text[range.startOffset - 1] !== "@") return;
-  range.startContainer.textContent = `${text.slice(0, range.startOffset - 1)}${text.slice(range.startOffset)}`;
-  range.setStart(range.startContainer, range.startOffset - 1);
-  range.collapse(true);
-  selection.removeAllRanges();
-  selection.addRange(range);
+function promptMentionValues() {
+  return (promptEditor?.assetCatalog || []).map((asset) => {
+    const label = asset.name && asset.name !== asset.id ? `${asset.name} ${asset.id}` : asset.name || asset.id;
+    return {
+      id: asset.id,
+      name: asset.name || asset.id,
+      type: asset.type,
+      imageUrl: asset.imageUrl || "",
+      lookup: uniqueAssetIds([asset.name, asset.id, ...(asset.aliases || [])]).join(" "),
+      insertText: promptMentionDisplay(asset),
+      label
+    };
+  });
 }
 
-function renderPromptInlineTokenInner(asset = {}, tokenId = "") {
+function renderPromptMentionMenuItem(asset = {}) {
   return `
-    ${asset.imageUrl ? `<img src="${escapeAttr(asset.imageUrl)}" alt="${escapeAttr(asset.name || asset.id)}">` : ""}
-    <b>${escapeHtml(assetTypeLabel(asset.type))}</b>${escapeHtml(asset.name || asset.id)}
-    <button type="button" data-remove-prompt-asset="${escapeAttr(tokenId)}" aria-label="移除">×</button>
+    <span class="prompt-mention-option">
+      ${asset.imageUrl ? `<img src="${escapeAttr(asset.imageUrl)}" alt="${escapeAttr(asset.name || asset.id)}">` : `<i>${escapeHtml((asset.name || asset.id || "?").slice(0, 1))}</i>`}
+      <strong>${escapeHtml(asset.name || asset.id)}</strong>
+      <small>${escapeHtml(assetTypeLabel(asset.type))}</small>
+    </span>
   `;
 }
 
-function escapeSelector(value) {
-  return typeof CSS !== "undefined" && CSS.escape ? CSS.escape(String(value || "")) : String(value || "").replace(/"/g, "\\\"");
+function promptMentionMarkup(asset = {}) {
+  return promptMentionDisplay(asset);
+}
+
+function promptMentionDisplay(asset = {}) {
+  return `@${asset.name || asset.id}`;
+}
+
+function parsePromptMentions(text = "", assets = promptEditor?.assetCatalog || clientAssetCatalog()) {
+  const source = String(text || "");
+  const matches = [];
+  for (const asset of assets) {
+    for (const term of promptMentionParseTerms(asset, assets)) {
+      let start = 0;
+      const needle = `@${term}`;
+      while (start < source.length) {
+        const index = source.indexOf(needle, start);
+        if (index < 0) break;
+        matches.push({ id: asset.id, name: asset.name || asset.id, index, raw: needle, length: needle.length });
+        start = index + needle.length;
+      }
+    }
+  }
+  const accepted = [];
+  matches.sort((a, b) => a.index - b.index || b.length - a.length);
+  for (const match of matches) {
+    if (accepted.some((item) => rangesOverlap(match.index, match.index + match.length, item.index, item.index + item.length))) continue;
+    accepted.push(match);
+  }
+  return accepted.sort((a, b) => a.index - b.index);
+}
+
+function decodePromptMentionText(text = "") {
+  const source = String(text || "");
+  const mentions = parsePromptMentions(source);
+  if (!mentions.length) return source;
+  const pieces = [];
+  let cursor = 0;
+  for (const mention of mentions) {
+    if (mention.index < cursor) continue;
+    pieces.push(source.slice(cursor, mention.index));
+    pieces.push(`@${mention.id} ${mention.name}`);
+    cursor = mention.index + mention.raw.length;
+  }
+  pieces.push(source.slice(cursor));
+  return pieces.join("");
+}
+
+function updatePromptMentionPreview(field) {
+  const row = field?.closest(".prompt-edit-row");
+  const preview = row?.querySelector("[data-prompt-mention-preview]");
+  if (!preview) return;
+  preview.innerHTML = renderPromptMentionPreview(field.value || "");
+  preview.classList.toggle("is-empty", !String(field.value || "").trim());
+}
+
+function renderPromptMentionPreview(text = "") {
+  const source = String(text || "");
+  if (!source.trim()) return "输入 @ 可从项目资产库插入参考对象";
+  const mentions = parsePromptMentions(source);
+  if (!mentions.length) return escapeHtml(source);
+  const pieces = [];
+  let cursor = 0;
+  for (const mention of mentions) {
+    if (mention.index < cursor) continue;
+    pieces.push(escapeHtml(source.slice(cursor, mention.index)));
+    pieces.push(renderPromptMentionChip(mention));
+    cursor = mention.index + mention.raw.length;
+  }
+  pieces.push(escapeHtml(source.slice(cursor)));
+  return pieces.join("");
+}
+
+function renderPromptMentionChip(mention = {}) {
+  const asset = findClientAsset(mention.id) || { id: mention.id, name: mention.name, type: "prop", imageUrl: "" };
+  const typeLabel = assetTypeLabel(asset.type);
+  const label = asset.name || asset.id || mention.raw || "参考对象";
+  return `
+    <span class="prompt-asset-chip" title="${escapeAttr(`${typeLabel} ${label}`)}" data-asset-id="${escapeAttr(asset.id || "")}">
+      ${asset.imageUrl ? `<img src="${escapeAttr(asset.imageUrl)}" alt="${escapeAttr(label)}">` : `<i>${escapeHtml(label.slice(0, 1))}</i>`}
+      <b>${escapeHtml(typeLabel)}</b>
+      <span>${escapeHtml(label)}</span>
+    </span>
+  `;
 }
 
 function updatePromptReferenceCounter() {
@@ -1256,6 +1286,7 @@ async function savePromptPackageEdits() {
     closePromptDetailModal();
     return;
   }
+  syncPromptTagifyEditors();
   const payload = readPromptEditorPayload();
   await withBusy(`prompt-edit:${promptEditor.packageId}`, async () => {
     const data = await api.post("/api/prompt-packages/save", payload);
@@ -1276,7 +1307,7 @@ function readPromptEditorPayload() {
     assetRefs: refs(`audio:${index}`)
   }));
   const dialogue = (pack.dialogue || []).map((row, index) => ({
-    speakerAssetId: [...refs(`dialogueText:${index}`), ...refs(`dialogueVoice:${index}`)][0] || row.speakerAssetId || "",
+    speakerAssetId: [...refs(`dialogueText:${index}`), ...refs(`dialogueVoice:${index}`)][0] || "",
     voice: read(`dialogueVoice:${index}`),
     text: read(`dialogueText:${index}`)
   }));
@@ -1955,7 +1986,7 @@ function buildPromptPackageExport(packageId) {
   if (!episode || !pack) return null;
   const shot = (episode.shots || []).find((item) => item.id === pack.shotId) || {};
   const project = current.config?.project || {};
-  const referenceAssets = normalizeExportAssets(pack.assetReferences?.length ? pack.assetReferences : inferShotAssets(shot, clientAssetCatalog()));
+  const referenceAssets = normalizeExportAssets(promptPackageReferenceAssets(pack));
   const subShots = (pack.subShots || []).map((subShot, index) => ({
     id: subShot.id || `${pack.shotId || shot.id || "SH"}-${String(index + 1).padStart(2, "0")}`,
     timeRange: subShot.timeRange || "",
@@ -2070,6 +2101,15 @@ function normalizeExportAssets(assets = []) {
       imageUrl: full.imageUrl || asset?.imageUrl || ""
     };
   })).filter((asset) => asset.id);
+}
+
+function promptPackageReferenceAssets(pack = {}) {
+  const ids = Array.isArray(pack.assetRefs) ? pack.assetRefs : [];
+  if (!ids.length) return [];
+  const byId = new Map((pack.assetReferences || []).map((asset) => [asset.id, asset]));
+  return uniqueAssetIds(ids)
+    .map((id) => byId.get(id) || findClientAsset(id))
+    .filter(Boolean);
 }
 
 function filterExportAssetRefs(refs = [], assets = []) {
@@ -2703,7 +2743,7 @@ function renderShots(shots, packages) {
   els.shotsOutput.innerHTML = shots.map((shot) => {
     const pack = packageByShot.get(shot.id);
     const video = videosByShot.get(shot.id) || {};
-    const assets = pack?.assetReferences?.length ? pack.assetReferences : inferShotAssets(shot, assetCatalog);
+    const assets = pack ? promptPackageReferenceAssets(pack) : inferShotAssets(shot, assetCatalog);
     const activeAssetTab = normalizeShotAssetTab(current.shotAssetTabs?.[shot.id] || "all");
     const visibleAssets = filterShotAssets(assets, activeAssetTab);
     const promptRunning = isJobRunning(promptJobKey(shot.id));
@@ -2885,7 +2925,7 @@ function normalizeShotAssetTab(type) {
 }
 
 function renderPromptSummary(pack, shot, assets = []) {
-  const refs = pack.assetReferences?.length ? pack.assetReferences : assets;
+  const refs = promptPackageReferenceAssets(pack);
   const summary = [
     pack.soundDesign ? `音效：${pack.soundDesign}` : "",
     (pack.dialogue || []).length ? `台词：${pack.dialogue.map((row) => `${row.speakerAssetId || "角色"}：${row.text}`).join(" / ")}` : "",
@@ -3010,48 +3050,111 @@ function promptEditorReferenceAssets(pack = {}) {
   return uniqueAssets(refs.map((id) => findClientAsset(id)).filter(Boolean));
 }
 
-function renderPromptEditRow({ key, label, value, refs = [], multiline = false }) {
+function renderPromptEditRowLegacy({ key, label, value, refs = [], multiline = false }) {
   const uniqueRefs = uniqueAssetIds(refs).filter((id) => findClientAsset(id));
-  const attrs = `data-prompt-field="${escapeAttr(key)}" contenteditable="true" role="textbox" aria-multiline="${multiline ? "true" : "false"}" data-placeholder="输入 @ 可添加参考对象"`;
+  const editorValue = encodePromptEditorText(value || "", uniqueRefs);
   return `
     <div class="prompt-edit-row">
       <label>
         <span>${escapeHtml(label)}</span>
-        <div class="prompt-inline-editor ${multiline ? "is-multiline" : ""}" ${attrs}>${renderPromptInlineContent(value || "", uniqueRefs)}</div>
+        <textarea class="prompt-mention-editor ${multiline ? "is-multiline" : ""}" data-prompt-field="${escapeAttr(key)}" data-prompt-editor="true" rows="${multiline ? 3 : 1}" placeholder="输入 @ 可从项目资产库插入参考对象">${escapeHtml(editorValue)}</textarea>
       </label>
+      <button type="button" class="prompt-mention-preview" data-prompt-mention-preview>${renderPromptMentionPreview(editorValue)}</button>
     </div>
   `;
 }
 
-function renderPromptInlineContent(text = "", refs = []) {
-  const assets = uniqueAssetIds(refs).map(findClientAsset).filter(Boolean);
-  const body = escapeHtml(stripInlineAssetText(text, assets));
-  return `${assets.map((asset, index) => renderPromptInlineToken(asset, `initial||${asset.id}||${index}`)).join(" ")}${assets.length && body ? " " : ""}${body}`;
-}
-
-function renderPromptInlineToken(asset = {}, tokenId = "") {
-  if (!asset?.id) return "";
+function renderPromptEditRow({ key, label, value, refs = [], multiline = false }) {
+  const uniqueRefs = promptEditor?.manualEdited ? [] : uniqueAssetIds(refs).filter((id) => findClientAsset(id));
+  const editorValue = encodePromptEditorText(value || "", uniqueRefs);
   return `
-    <span class="prompt-inline-token" contenteditable="false" data-asset-token="true" data-asset-id="${escapeAttr(asset.id)}" data-asset-name="${escapeAttr(asset.name || asset.id)}" data-token-id="${escapeAttr(tokenId)}">
-      ${renderPromptInlineTokenInner(asset, tokenId)}
-    </span>
+    <div class="prompt-edit-row">
+      <label>
+        <span>${escapeHtml(label)}</span>
+        <textarea class="prompt-mention-editor ${multiline ? "is-multiline" : ""}" data-prompt-field="${escapeAttr(key)}" data-prompt-editor="true" rows="${multiline ? 3 : 1}" placeholder="输入 @ 可从项目资产库插入参考对象">${escapeHtml(editorValue)}</textarea>
+      </label>
+      <button type="button" class="prompt-mention-preview" data-prompt-mention-preview>${renderPromptMentionPreview(editorValue)}</button>
+    </div>
   `;
 }
 
-function stripInlineAssetText(text = "", assets = []) {
-  let output = String(text || "");
+function encodePromptEditorText(text = "", refs = []) {
+  const source = String(text || "");
+  const assets = uniqueAssetIds(refs).map(findClientAsset).filter(Boolean);
+  if (!assets.length || !source) return source;
+  const matches = findPromptAssetTextMatches(source, assets);
+  if (!matches.length) return `${source}${source.trim() ? " " : ""}${assets.map(promptMentionMarkup).join(" ")}`;
+  const pieces = [];
+  let cursor = 0;
+  const used = new Set();
+  matches.forEach((match) => {
+    if (match.index < cursor) return;
+    pieces.push(source.slice(cursor, match.index));
+    pieces.push(promptMentionMarkup(match.asset));
+    used.add(match.asset.id);
+    cursor = match.index + match.length;
+  });
+  pieces.push(source.slice(cursor));
+  const missing = assets.filter((asset) => !used.has(asset.id));
+  if (missing.length) {
+    pieces.push(`${pieces.join("").trim() ? " " : ""}${missing.map(promptMentionMarkup).join(" ")}`);
+  }
+  return pieces.join("");
+}
+
+function findPromptAssetTextMatches(text = "", assets = []) {
+  const source = String(text || "");
+  const searchSource = source.toLowerCase();
+  const candidates = [];
   for (const asset of assets) {
-    const patterns = [
-      `@${asset.id} ${asset.name || asset.id}`,
-      `@${asset.name || asset.id}`,
-      asset.id,
-      asset.name
-    ].filter(Boolean).sort((a, b) => b.length - a.length);
-    for (const pattern of patterns) {
-      output = output.replaceAll(pattern, "");
+    for (const term of promptAssetMentionTerms(asset, assets)) {
+      const searchTerm = term.toLowerCase();
+      let start = 0;
+      while (searchTerm && start < searchSource.length) {
+        const index = searchSource.indexOf(searchTerm, start);
+        if (index < 0) break;
+        candidates.push({ index, length: term.length, asset });
+        start = index + term.length;
+      }
     }
   }
-  return output.replace(/\s+/g, " ").trim();
+  const accepted = [];
+  candidates.sort((a, b) => a.index - b.index || b.length - a.length);
+  for (const candidate of candidates) {
+    if (accepted.some((item) => rangesOverlap(candidate.index, candidate.index + candidate.length, item.index, item.index + item.length))) continue;
+    accepted.push(candidate);
+  }
+  return accepted.sort((a, b) => a.index - b.index);
+}
+
+function promptAssetMentionTerms(asset = {}, scopedAssets = []) {
+  const id = String(asset.id || "").trim();
+  const name = String(asset.name || "").trim();
+  const aliases = Array.isArray(asset.aliases) ? asset.aliases : [];
+  const aliasTerms = aliases.map((alias) => String(alias || "").trim()).filter((term) => term.length >= 2 || uniqueShortAliasForAsset(term, asset, scopedAssets));
+  const bareTerms = uniqueAssetIds([id, name, ...aliasTerms]).filter(Boolean);
+  const mentionTerms = bareTerms.map((term) => `@${term}`);
+  if (id && name && id !== name) {
+    mentionTerms.push(`@${id} ${name}`, `@${id}${name}`);
+  }
+  return uniqueAssetIds([...mentionTerms, ...bareTerms]).sort((a, b) => b.length - a.length);
+}
+
+function promptMentionParseTerms(asset = {}, scopedAssets = []) {
+  return promptAssetMentionTerms(asset, scopedAssets)
+    .map((term) => term.replace(/^@/, ""))
+    .filter(Boolean);
+}
+
+function uniqueShortAliasForAsset(alias = "", asset = {}, scopedAssets = []) {
+  const value = String(alias || "").trim();
+  if (value.length !== 1) return false;
+  const sameAliasAssets = scopedAssets.filter((item) => (item.aliases || []).map((name) => String(name || "").trim()).includes(value));
+  return sameAliasAssets.length === 1 && sameAliasAssets[0]?.id === asset.id;
+}
+
+function rangesOverlap(startA, endA, startB, endB) {
+  return startA < endB && startB < endA;
 }
 
 function uniqueAssetIds(ids = []) {
@@ -3593,4 +3696,491 @@ function escapeHtml(value) {
 
 function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, "&#96;");
+}
+
+// Tagify mixed-mode editor overrides for inline asset chips in Seedance prompt fields.
+function promptFieldRefs(field) {
+  const source = promptTagifyFieldValue(field);
+  return uniqueAssetIds([
+    ...parsePromptTagifyMentions(source).map((item) => item.id),
+    ...parsePromptMentions(decodePromptTagifyText(source)).map((item) => item.id)
+  ]);
+}
+
+function promptFieldText(field) {
+  if (!field) return "";
+  return decodePromptMentionText(decodePromptTagifyText(promptTagifyFieldValue(field))).trim();
+}
+
+function promptTagifyFieldValue(field) {
+  const entry = promptTagifyEntryForField(field);
+  if (entry?.tagify) {
+    entry.tagify.updateValueByDOMTags();
+    entry.tagify.update({ withoutChangeEvent: true });
+  }
+  return String(field?.value || "");
+}
+
+function promptTagifyEntryForField(field) {
+  if (!field) return null;
+  return (promptEditor?.tagifyFields || []).find((entry) => entry.field === field) || null;
+}
+
+function syncPromptTagifyEditors() {
+  (promptEditor?.tagifyFields || []).forEach(({ tagify }) => {
+    tagify.updateValueByDOMTags();
+    tagify.update({ withoutChangeEvent: true });
+  });
+}
+
+function attachPromptMentionEditors() {
+  if (!promptEditor) return;
+  const fields = [...els.promptDetailBody.querySelectorAll("[data-prompt-editor]")];
+  promptEditor.attachedFields = fields;
+  if (typeof Tagify === "undefined") {
+    toast("提示词 @ 标签编辑器未加载");
+    return;
+  }
+  promptEditor.tagifyFields = fields.map((field) => {
+    const tagify = new Tagify(field, {
+      mode: "mix",
+      pattern: /@/,
+      tagTextProp: "name",
+      enforceWhitelist: true,
+      duplicates: true,
+      whitelist: promptMentionValues(),
+      dropdown: {
+        enabled: 0,
+        position: "text",
+        highlightFirst: true,
+        maxItems: 20,
+        classname: "prompt-tagify-dropdown",
+        searchKeys: ["value", "name", "id", "aliasesText"]
+      },
+      templates: {
+        tag: tagifyAssetTagTemplate,
+        dropdownItem: tagifyAssetDropdownTemplate
+      },
+      transformTag(tagData) {
+        const asset = findClientAsset(tagData.id || tagData.value) || tagData;
+        tagData.id = asset.id || tagData.id || tagData.value;
+        tagData.value = asset.id || tagData.value;
+        tagData.name = asset.name || tagData.name || tagData.value;
+        tagData.type = normalizeAssetType(asset.type || tagData.type);
+        tagData.imageUrl = asset.imageUrl || tagData.imageUrl || "";
+        tagData.aliasesText = Array.isArray(asset.aliases) ? asset.aliases.join(" ") : tagData.aliasesText || "";
+      }
+    });
+    tagify.on("add", schedulePromptReferenceCounter);
+    tagify.on("remove", schedulePromptReferenceCounter);
+    tagify.on("input", schedulePromptReferenceCounter);
+    tagify.on("change", schedulePromptReferenceCounter);
+    return { field, tagify };
+  });
+  schedulePromptReferenceCounter();
+}
+
+function detachPromptMentionEditors() {
+  (promptEditor?.tagifyFields || []).forEach(({ tagify }) => tagify.destroy());
+}
+
+function schedulePromptReferenceCounter() {
+  window.setTimeout(updatePromptReferenceCounter, 120);
+}
+
+function promptMentionValues() {
+  return (promptEditor?.assetCatalog || []).map((asset) => {
+    const name = asset.name || asset.id;
+    return {
+      value: asset.id,
+      id: asset.id,
+      name,
+      type: normalizeAssetType(asset.type),
+      imageUrl: asset.imageUrl || "",
+      aliasesText: uniqueAssetIds([...(asset.aliases || []), asset.id, name]).join(" ")
+    };
+  });
+}
+
+function tagifyAssetTagTemplate(tagData) {
+  const asset = findClientAsset(tagData.id || tagData.value) || tagData;
+  const typeLabel = assetTypeLabel(asset.type || tagData.type);
+  const name = asset.name || tagData.name || tagData.value || "参考对象";
+  const imageUrl = asset.imageUrl || tagData.imageUrl || "";
+  return `
+    <tag title="${escapeAttr(`${typeLabel} ${name}`)}" contenteditable="false" spellcheck="false" tabindex="-1" class="${this.settings.classNames.tag} prompt-asset-mix-chip" ${this.getAttributes(tagData)}>
+      <div>
+        ${imageUrl ? `<img src="${escapeAttr(imageUrl)}" alt="${escapeAttr(name)}">` : `<i>${escapeHtml(String(name).slice(0, 1))}</i>`}
+        <b>${escapeHtml(typeLabel)}</b>
+        <span class="${this.settings.classNames.tagText}">${escapeHtml(name)}</span>
+      </div>
+    </tag>
+  `;
+}
+
+function tagifyAssetDropdownTemplate(tagData) {
+  const typeLabel = assetTypeLabel(tagData.type);
+  const name = tagData.name || tagData.value || "参考对象";
+  return `
+    <div ${this.getAttributes(tagData)} class="${this.settings.classNames.dropdownItem} prompt-tagify-option" tabindex="0" role="option">
+      ${tagData.imageUrl ? `<img src="${escapeAttr(tagData.imageUrl)}" alt="${escapeAttr(name)}">` : `<i>${escapeHtml(String(name).slice(0, 1))}</i>`}
+      <strong>${escapeHtml(name)}</strong>
+      <small>${escapeHtml(typeLabel)}</small>
+    </div>
+  `;
+}
+
+function parsePromptTagifyMentions(text = "") {
+  return parsePromptTagifyFragments(text).flatMap((fragment) => fragment.items.map((item) => ({
+    ...item,
+    index: fragment.index,
+    raw: fragment.raw,
+    length: fragment.length
+  })));
+}
+
+function parsePromptTagifyFragments(text = "") {
+  const source = String(text || "");
+  const fragments = [];
+  let index = 0;
+  while (index < source.length) {
+    if (source.startsWith("[[", index)) {
+      const end = source.indexOf("]]", index + 2);
+      if (end >= 0) {
+        const raw = source.slice(index, end + 2);
+        const items = parsePromptTagifyDataItems(source.slice(index + 2, end));
+        if (items.length) {
+          fragments.push({ index, raw, length: raw.length, items });
+          index = end + 2;
+          continue;
+        }
+      }
+    }
+    if (source[index] === "[" || source[index] === "{") {
+      const end = findPromptJsonFragmentEnd(source, index);
+      if (end > index) {
+        const raw = source.slice(index, end);
+        const items = parsePromptTagifyDataItems(raw);
+        if (items.length) {
+          fragments.push({ index, raw, length: raw.length, items });
+          index = end;
+          continue;
+        }
+      }
+    }
+    index += 1;
+  }
+  return fragments;
+}
+
+function parsePromptTagifyData(value = "") {
+  const source = String(value || "");
+  try {
+    const data = JSON.parse(source);
+    return data && typeof data === "object" ? data : null;
+  } catch {
+    const unescaped = source.replace(/\\"/g, "\"");
+    if (unescaped === source) return null;
+    try {
+      const data = JSON.parse(unescaped);
+      return data && typeof data === "object" ? data : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+function parsePromptTagifyDataItems(value = "") {
+  const data = parsePromptTagifyData(value);
+  const rows = Array.isArray(data) ? data : [data];
+  return rows.map(normalizePromptTagifyData).filter(Boolean);
+}
+
+function normalizePromptTagifyData(data = {}) {
+  if (!data || typeof data !== "object") return null;
+  const id = String(data.id || data.value || "").trim();
+  if (!id) return null;
+  const asset = findClientAsset(id);
+  if (!asset && !data.name && !data.type && !data.imageUrl) return null;
+  return {
+    id,
+    name: asset?.name || data.name || id,
+    type: normalizeAssetType(asset?.type || data.type),
+    imageUrl: asset?.imageUrl || data.imageUrl || ""
+  };
+}
+
+function findPromptJsonFragmentEnd(source = "", start = 0) {
+  const opener = source[start];
+  if (opener !== "[" && opener !== "{") return -1;
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "[" || char === "{") {
+      stack.push(char);
+      continue;
+    }
+    if (char !== "]" && char !== "}") continue;
+    const expected = char === "]" ? "[" : "{";
+    if (stack.pop() !== expected) return -1;
+    if (!stack.length) return index + 1;
+  }
+  return -1;
+}
+
+function decodePromptTagifyText(text = "") {
+  const source = String(text || "");
+  const fragments = parsePromptTagifyFragments(source);
+  if (!fragments.length) return source;
+  const pieces = [];
+  let cursor = 0;
+  fragments.forEach((fragment) => {
+    if (fragment.index < cursor) return;
+    pieces.push(source.slice(cursor, fragment.index));
+    pieces.push(fragment.items.map((item) => `@${item.id} ${item.name}`).join(" "));
+    cursor = fragment.index + fragment.length;
+  });
+  pieces.push(source.slice(cursor));
+  return pieces.join("");
+}
+
+function renderPromptEditRow({ key, label, value, refs = [], multiline = false }) {
+  const uniqueRefs = uniqueAssetIds(refs).filter((id) => findClientAsset(id));
+  const editorValue = encodePromptEditorText(value || "", uniqueRefs);
+  return `
+    <div class="prompt-edit-row">
+      <label>
+        <span>${escapeHtml(label)}</span>
+        <textarea class="prompt-mention-editor ${multiline ? "is-multiline" : ""}" data-prompt-field="${escapeAttr(key)}" data-prompt-editor="true" rows="${multiline ? 3 : 1}" placeholder="输入 @ 可从项目资产库插入参考对象">${escapeHtml(encodePromptTagifyText(editorValue))}</textarea>
+      </label>
+    </div>
+  `;
+}
+
+function encodePromptTagifyText(text = "") {
+  const source = String(text || "");
+  const mentions = parsePromptMentions(source);
+  if (!mentions.length) return source;
+  const pieces = [];
+  let cursor = 0;
+  for (const mention of mentions) {
+    if (mention.index < cursor) continue;
+    pieces.push(source.slice(cursor, mention.index));
+    const asset = findClientAsset(mention.id) || { id: mention.id, name: mention.name, type: "prop", imageUrl: "" };
+    pieces.push(`[[${JSON.stringify({
+      value: asset.id,
+      id: asset.id,
+      name: asset.name || asset.id,
+      type: normalizeAssetType(asset.type),
+      imageUrl: asset.imageUrl || ""
+    })}]]`);
+    cursor = mention.index + mention.raw.length;
+  }
+  pieces.push(source.slice(cursor));
+  return pieces.join("");
+}
+
+// Final prompt draft editor implementation: current visible Tagify content is the source of truth.
+function attachPromptMentionEditors() {
+  if (!promptEditor) return;
+  const fields = [...els.promptDetailBody.querySelectorAll("[data-prompt-editor]")];
+  promptEditor.attachedFields = fields;
+  promptEditor.tagifyFields = [];
+  if (typeof Tagify === "undefined") {
+    toast("提示词 @ 标签编辑器未加载");
+    return;
+  }
+  fields.forEach((field) => {
+    const tagify = new Tagify(field, {
+      mode: "mix",
+      pattern: /@/,
+      tagTextProp: "name",
+      enforceWhitelist: true,
+      duplicates: true,
+      whitelist: promptMentionValues(),
+      dropdown: {
+        enabled: 0,
+        position: "text",
+        highlightFirst: true,
+        maxItems: 20,
+        classname: "prompt-tagify-dropdown",
+        searchKeys: ["value", "name", "id", "aliasesText"]
+      },
+      templates: {
+        tag: tagifyAssetTagTemplate,
+        dropdownItem: tagifyAssetDropdownTemplate
+      },
+      transformTag(tagData) {
+        const asset = findClientAsset(tagData.id || tagData.value) || tagData;
+        tagData.id = asset.id || tagData.id || tagData.value;
+        tagData.value = asset.id || tagData.value;
+        tagData.name = asset.name || tagData.name || tagData.value;
+        tagData.type = normalizeAssetType(asset.type || tagData.type);
+        tagData.imageUrl = asset.imageUrl || tagData.imageUrl || "";
+        tagData.aliasesText = Array.isArray(asset.aliases) ? asset.aliases.join(" ") : tagData.aliasesText || "";
+      }
+    });
+    tagify.on("add", schedulePromptReferenceCounter);
+    tagify.on("remove", schedulePromptReferenceCounter);
+    tagify.on("input", schedulePromptReferenceCounter);
+    tagify.on("change", schedulePromptReferenceCounter);
+    promptEditor.tagifyFields.push({ field, tagify });
+  });
+  updatePromptReferenceCounter();
+}
+
+function detachPromptMentionEditors() {
+  (promptEditor?.tagifyFields || []).forEach(({ tagify }) => tagify.destroy());
+  if (promptEditor) promptEditor.tagifyFields = [];
+}
+
+function renderPromptEditRow({ key, label, value, refs = [], multiline = false }) {
+  const editorValue = promptEditorInitialValue(value || "", refs);
+  return `
+    <div class="prompt-edit-row">
+      <label>
+        <span>${escapeHtml(label)}</span>
+        <textarea class="prompt-mention-editor ${multiline ? "is-multiline" : ""}" data-prompt-field="${escapeAttr(key)}" data-prompt-editor="true" rows="${multiline ? 3 : 1}" placeholder="输入 @ 可从项目资产库插入参考对象">${escapeHtml(encodePromptTagifyText(editorValue))}</textarea>
+      </label>
+    </div>
+  `;
+}
+
+function promptEditorInitialValue(text = "", refs = []) {
+  const source = decodePromptMentionText(decodePromptTagifyText(text || ""));
+  if (!source.trim()) return "";
+  const visibleMentions = parsePromptMentions(source);
+  if (visibleMentions.length) return source;
+  if (promptEditor?.manualEdited) return source;
+  return insertPromptRefsIntoExistingText(source, refs);
+}
+
+function insertPromptRefsIntoExistingText(text = "", refs = []) {
+  const source = String(text || "");
+  const assets = uniqueAssetIds(refs).map(findClientAsset).filter(Boolean);
+  if (!assets.length) return source;
+  const matches = findPromptAssetTextMatches(source, assets);
+  if (!matches.length) return source;
+  const pieces = [];
+  let cursor = 0;
+  for (const match of matches) {
+    if (match.index < cursor) continue;
+    pieces.push(source.slice(cursor, match.index));
+    pieces.push(promptMentionDisplay(match.asset));
+    cursor = match.index + match.length;
+  }
+  pieces.push(source.slice(cursor));
+  return pieces.join("");
+}
+
+function promptFieldRefs(field) {
+  return promptDraftField(field).refs;
+}
+
+function promptFieldText(field) {
+  return promptDraftField(field).text;
+}
+
+function promptDraftField(field) {
+  const raw = promptTagifyFieldValue(field);
+  const text = decodePromptMentionText(decodePromptTagifyText(raw));
+  const refs = [
+    ...parsePromptTagifyMentions(raw).map((item) => item.id),
+    ...parsePromptMentions(text).map((item) => item.id)
+  ];
+  return {
+    refs: uniqueAssetIds(refs),
+    text: text.trim()
+  };
+}
+
+function promptTagifyFieldValue(field) {
+  const entry = promptTagifyEntryForField(field);
+  if (entry?.tagify) return promptTagifyValueFromDom(entry.tagify);
+  return String(field?.value || "");
+}
+
+function promptTagifyValueFromDom(tagify) {
+  const input = tagify?.DOM?.input;
+  if (!input) return "";
+  return promptTagifySerializeNode(input).trim();
+}
+
+function promptTagifySerializeNode(root) {
+  const pieces = [];
+  root.childNodes.forEach((node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      pieces.push(node.nodeValue || "");
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    if (node.tagName === "BR") {
+      pieces.push("\n");
+      return;
+    }
+    if (node.matches?.(".tagify__tag")) {
+      const data = node.__tagifyTagData || {};
+      const id = data.id || data.value || "";
+      const asset = findClientAsset(id) || data;
+      if (id) {
+        pieces.push(`[[${JSON.stringify({
+          value: id,
+          id,
+          name: asset.name || data.name || id,
+          type: normalizeAssetType(asset.type || data.type),
+          imageUrl: asset.imageUrl || data.imageUrl || ""
+        })}]]`);
+      }
+      return;
+    }
+    pieces.push(promptTagifySerializeNode(node));
+  });
+  return pieces.join("");
+}
+
+function syncPromptTagifyEditors() {
+  (promptEditor?.tagifyFields || []).forEach(({ field, tagify }) => {
+    const value = promptTagifyValueFromDom(tagify);
+    field.value = value;
+    if (tagify.DOM?.originalInput) tagify.DOM.originalInput.value = value;
+  });
+}
+
+function encodePromptTagifyText(text = "") {
+  const source = decodePromptTagifyText(text || "");
+  const mentions = parsePromptMentions(source);
+  if (!mentions.length) return source;
+  const pieces = [];
+  let cursor = 0;
+  for (const mention of mentions) {
+    if (mention.index < cursor) continue;
+    pieces.push(source.slice(cursor, mention.index));
+    const asset = findClientAsset(mention.id) || { id: mention.id, name: mention.name, type: "prop", imageUrl: "" };
+    pieces.push(`[[${JSON.stringify({
+      value: asset.id,
+      id: asset.id,
+      name: asset.name || asset.id,
+      type: normalizeAssetType(asset.type),
+      imageUrl: asset.imageUrl || ""
+    })}]]`);
+    cursor = mention.index + mention.raw.length;
+  }
+  pieces.push(source.slice(cursor));
+  return pieces.join("");
 }
