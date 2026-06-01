@@ -529,7 +529,9 @@ function syncServerJobs(serverJobs = [], options = {}) {
           seenServerJobErrors.add(errorKey);
           toast(`${job.label || "生成失败"}：${job.error}`);
         }
-        clearJobSoon(key);
+        if (!shouldPersistJobError(key)) {
+          clearJobSoon(key);
+        }
       }
       continue;
     }
@@ -629,7 +631,7 @@ function clientJobKeyFromServer(job = {}) {
     const scopeId = String(job.scopeId || "");
     const parts = scopeId.split(":").filter(Boolean);
     if (parts.length >= 2) return promptJobKeyForEpisode(parts[0], parts.slice(1).join(":"));
-    return promptJobKeyForEpisode(getActiveEpisode()?.id, scopeId);
+    return `prompt-package:legacy:${scopeId || "global"}`;
   }
   if (job.type === "video-clip") {
     return `video-clip:${job.scopeId || "video-clips"}`;
@@ -1876,7 +1878,7 @@ function mergePromptPackagesFromState(serverState, episodeId) {
     current.state = incomingState;
     return;
   }
-  localEpisode.promptPackages = mergeClientById(localEpisode.promptPackages || [], incomingEpisode.promptPackages || []);
+  localEpisode.promptPackages = mergePromptPackagesByShot(localEpisode.promptPackages || [], incomingEpisode.promptPackages || []);
   localEpisode.updatedAt = incomingEpisode.updatedAt || localEpisode.updatedAt;
   current.state.assetImages = mergeClientById(current.state.assetImages || [], incomingState.assetImages || []);
   current.state.cards = incomingState.cards || current.state.cards;
@@ -1890,6 +1892,14 @@ function mergeClientById(previous, next) {
     map.set(item.id, item);
   }
   return [...map.values()];
+}
+
+function mergePromptPackagesByShot(previous, next) {
+  const nextShotIds = new Set((next || []).map((item) => item.shotId).filter(Boolean));
+  return [
+    ...(previous || []).filter((item) => !nextShotIds.has(item.shotId)),
+    ...(next || [])
+  ];
 }
 
 async function runPackageAssetImages(packageId) {
@@ -2205,19 +2215,26 @@ async function withBusy(keyOrTask, taskOrFailPrefix, maybeFailPrefix) {
   } catch (error) {
     console.error(error);
     setServiceStatus("本地服务异常", false);
-    setJob(key, "error", failPrefix || "失败");
+    setJob(key, "error", failPrefix || "失败", { serverError: error.message });
     toast(`${failPrefix}: ${error.message}`);
     return false;
   } finally {
-    clearJobSoon(key);
+    if (jobs.get(key)?.status !== "error" || !shouldPersistJobError(key)) {
+      clearJobSoon(key);
+    }
   }
 }
 
-function setJob(key, status, label = "") {
+function shouldPersistJobError(key = "") {
+  return key.startsWith("prompt-package:") && !key.startsWith("prompt-package:legacy:");
+}
+
+function setJob(key, status, label = "", detail = {}) {
   jobs.set(key, {
     status,
     label,
-    updatedAt: Date.now()
+    updatedAt: Date.now(),
+    ...detail
   });
   busy = hasRunningJobs();
   renderJobFeedback();
@@ -2757,8 +2774,11 @@ function renderShots(shots, packages) {
     const assets = pack ? promptPackageReferenceAssets(pack) : inferShotAssets(shot, assetCatalog);
     const activeAssetTab = normalizeShotAssetTab(current.shotAssetTabs?.[shot.id] || "all");
     const visibleAssets = filterShotAssets(assets, activeAssetTab);
-    const promptRunning = isJobRunning(promptJobKey(shot.id));
-    const promptLocked = promptRunning || relatedJobRunning(promptJobKey(shot.id));
+    const promptKey = promptJobKey(shot.id);
+    const promptJob = jobs.get(promptKey);
+    const promptRunning = promptJob?.status === "running";
+    const promptError = promptJob?.status === "error" ? promptJob : null;
+    const promptLocked = promptRunning || relatedJobRunning(promptKey);
     const assetsRunning = isJobRunning(packageAssetsJobKey(shot.id));
     return `
       <article class="shot-pipeline-row ${promptRunning || assetsRunning ? "is-generating" : ""}">
@@ -2780,11 +2800,11 @@ function renderShots(shots, packages) {
           <button class="pipeline-action" type="button" data-generate-package-assets="${escapeAttr(shot.id)}" data-job-key="${escapeAttr(packageAssetsJobKey(shot.id))}" data-idle-text="提取资产" data-loading-text="提取中..." ${assetsRunning ? "disabled" : ""}>${assetsRunning ? "提取中..." : "提取资产"}</button>
         </section>
         <section class="shot-cell shot-prompt-cell">
-          ${promptRunning ? `<div class="pending-panel is-live"><span class="spinner"></span><strong>Seedance 提示词生成中</strong><small>可继续浏览其他分镜</small></div>` : pack ? renderPromptSummary(pack, shot, assets) : `<div class="pending-panel">待生成</div>`}
+          ${promptRunning ? `<div class="pending-panel is-live"><span class="spinner"></span><strong>Seedance 提示词生成中</strong><small>可继续浏览其他分镜</small></div>` : pack ? renderPromptSummary(pack, shot, assets) : promptError ? renderPromptError(promptError) : `<div class="pending-panel">待生成</div>`}
           <div class="prompt-action-row">
             ${pack ? `<button class="pipeline-action secondary-action" type="button" data-view-prompt="${escapeAttr(pack.id)}">查看提示词</button>` : ""}
             ${pack ? `<button class="pipeline-action secondary-action" type="button" data-export-prompt="${escapeAttr(pack.id)}">导出 JSON</button>` : ""}
-            <button class="pipeline-action" type="button" data-generate-prompt="${escapeAttr(shot.id)}" data-job-key="${escapeAttr(promptJobKey(shot.id))}" data-idle-text="${pack ? "重新生成" : "生成提示词"}" data-loading-text="生成中..." ${promptLocked ? "disabled" : ""}>${promptRunning ? "生成中..." : pack ? "重新生成" : "生成提示词"}</button>
+            <button class="pipeline-action" type="button" data-generate-prompt="${escapeAttr(shot.id)}" data-job-key="${escapeAttr(promptKey)}" data-idle-text="${pack ? "重新生成" : "生成提示词"}" data-loading-text="生成中..." ${promptLocked ? "disabled" : ""}>${promptRunning ? "生成中..." : pack ? "重新生成" : "生成提示词"}</button>
           </div>
         </section>
         <section class="shot-cell shot-video-cell">
@@ -2951,6 +2971,16 @@ function renderPromptSummary(pack, shot, assets = []) {
       </div>
       <p>${escapeHtml(clipText(summary, 190))}</p>
       ${renderAssetMentions(refs)}
+    </div>
+  `;
+}
+
+function renderPromptError(job = {}) {
+  const message = job.serverError || job.label || "生成失败";
+  return `
+    <div class="pending-panel is-error">
+      <strong>提示词生成失败</strong>
+      <small>${escapeHtml(message)}</small>
     </div>
   `;
 }

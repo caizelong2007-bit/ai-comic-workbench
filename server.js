@@ -978,10 +978,21 @@ async function doGeneratePromptPackages(payload = {}) {
 
   const requestedIds = new Set(Array.isArray(payload.shotIds) ? payload.shotIds : []);
   const selectedShots = requestedIds.size ? episode.shots.filter((shot) => requestedIds.has(shot.id)) : episode.shots;
+  if (requestedIds.size && !selectedShots.length) {
+    throw new Error(`未找到要生成提示词的分镜：${[...requestedIds].join(", ")}`);
+  }
   const shots = selectedShots.map((shot) => ({ ...shot, durationSec: 15 }));
   const prompt = buildPromptPackagesPrompt(config, shots, state.cards, state.assetImages || [], episode);
   const result = await callLlmJson(resolveModelAdapter(config, "promptPackageLlm"), prompt, () => mockPromptPackages(config, shots, state.cards, state.assetImages || []));
   const outputs = normalizePromptPackages(result.data, shots, state.cards, state.assetImages || [], result.source, result.error || "", activeVideoProfile(config));
+  if (!outputs.length) {
+    throw new Error("模型没有返回可用的 Seedance 提示词包，请重试");
+  }
+  const outputShotIds = new Set(outputs.map((pack) => pack.shotId).filter(Boolean));
+  const missingShots = shots.filter((shot) => !outputShotIds.has(shot.id));
+  if (missingShots.length) {
+    throw new Error(`模型未返回这些分镜的提示词：${missingShots.map((shot) => shot.id).join(", ")}`);
+  }
 
   const latestState = await withStateWriteLock(async () => {
     const nextState = await readState();
@@ -990,7 +1001,7 @@ async function doGeneratePromptPackages(payload = {}) {
       throw new Error("剧集不存在");
     }
     const hydratedOutputs = hydratePromptPackageReferences(outputs, nextState.cards, nextState.assetImages || []);
-    latestEpisode.promptPackages = mergeById(latestEpisode.promptPackages || [], hydratedOutputs);
+    latestEpisode.promptPackages = mergePromptPackagesByShot(latestEpisode.promptPackages || [], hydratedOutputs);
     const updatedShotIds = new Set(hydratedOutputs.map((pack) => pack.shotId).filter(Boolean));
     latestEpisode.videos = (latestEpisode.videos || []).map((video) => updatedShotIds.has(video.shotId)
       ? {
@@ -3028,11 +3039,13 @@ function normalizePromptPackages(data, shots, cards, assetImages, source, adapte
   const assets = flattenCards(cards);
   const validAssetIds = new Set(assets.map((asset) => asset.id));
   return packages.map((item, index) => {
-    const shot = shots.find((candidate) => candidate.id === item.shotId) || shots[index] || {};
+    const matchedShot = shots.find((candidate) => candidate.id === item.shotId);
+    const shot = matchedShot || shots[index] || {};
+    if (!shot.id) return null;
     const subShots = Array.isArray(item.subShots) ? item.subShots : Array.isArray(item.sub_shots) ? item.sub_shots : [];
     const normalized = {
-      id: stringOr(item.id, `PKG-${shot.id || `SH${String(index + 1).padStart(2, "0")}`}`),
-      shotId: stringOr(item.shotId, shot.id || `SH${String(index + 1).padStart(2, "0")}`),
+      id: `PKG-${shot.id}`,
+      shotId: shot.id,
       targetProfile: stringOr(item.targetProfile, videoProfile?.id || DEFAULT_VIDEO_PROFILE_ID),
       videoProfile: {
         id: videoProfile?.id || DEFAULT_VIDEO_PROFILE_ID,
@@ -3067,7 +3080,7 @@ function normalizePromptPackages(data, shots, cards, assetImages, source, adapte
       normalized.seedancePrompt = buildSeedancePromptFromPackage(normalized, shot, assets, assetImages);
     }
     return normalized;
-  });
+  }).filter(Boolean);
 }
 
 function normalizeAssetType(value) {
@@ -4923,6 +4936,12 @@ function mergeById(previous, next) {
     map.set(item.id, item);
   }
   return [...map.values()].sort((a, b) => String(a.id).localeCompare(String(b.id), "en"));
+}
+
+function mergePromptPackagesByShot(previous, next) {
+  const nextShotIds = new Set((next || []).map((item) => item.shotId).filter(Boolean));
+  const kept = (previous || []).filter((item) => !nextShotIds.has(item.shotId));
+  return [...kept, ...(next || [])].sort((a, b) => String(a.shotId || a.id).localeCompare(String(b.shotId || b.id), "en"));
 }
 
 async function withStateWriteLock(task) {
