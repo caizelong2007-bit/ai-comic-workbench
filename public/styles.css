@@ -1293,6 +1293,22 @@ legend {
   font-size: 12px;
 }
 
+.pending-panel.is-error {
+  align-content: center;
+  gap: 8px;
+  padding: 12px;
+  color: #9f2f3f;
+  background: #fff2f4;
+}
+
+.pending-panel.is-error small {
+  max-width: 100%;
+  color: #b45a66;
+  font-size: 12px;
+  font-weight: 700;
+  word-break: break-word;
+}
+
 .shot-asset-empty {
   align-content: center;
   gap: 8px;
