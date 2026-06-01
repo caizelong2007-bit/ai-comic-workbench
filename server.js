@@ -18,6 +18,7 @@ const PORT = Number(process.env.PORT || 8800);
 const MAX_JSON_BODY_BYTES = 24 * 1024 * 1024;
 const MAX_SHOT_ASSET_REFS = 6;
 const JOB_STALE_MS = 2 * 60 * 60 * 1000;
+const PROMPT_JOB_STALE_MS = 20 * 60 * 1000;
 let stateWriteQueue = Promise.resolve();
 const apimartUploadCache = new Map();
 
@@ -702,7 +703,7 @@ async function generatePromptPackages(payload = {}) {
   const requestedIds = new Set(Array.isArray(payload.shotIds) ? payload.shotIds : []);
   const singleShotId = requestedIds.size === 1 ? [...requestedIds][0] : "";
   const type = singleShotId ? "prompt-package" : "generate";
-  const scopeId = singleShotId || "prompt-packages";
+  const scopeId = promptPackageJobScope(payload.episodeId, singleShotId);
   const existing = await getRunningJobSnapshot(type, scopeId);
   if (existing) {
     return { ok: true, state: existing.state, job: existing.job, duplicate: true };
@@ -725,6 +726,13 @@ async function generatePromptPackages(payload = {}) {
     });
     throw error;
   }
+}
+
+function promptPackageJobScope(episodeId = "", shotId = "") {
+  const shotScope = String(shotId || "").trim();
+  if (!shotScope) return "prompt-packages";
+  const episodeScope = String(episodeId || "").trim();
+  return episodeScope ? `${episodeScope}:${shotScope}` : shotScope;
 }
 
 async function savePromptPackageEdits(payload = {}) {
@@ -4755,14 +4763,17 @@ function normalizeJobs(jobs = []) {
         return job;
       }
       const updatedAt = Date.parse(job.updatedAt || job.createdAt || "");
-      if (!Number.isFinite(updatedAt) || now - updatedAt <= JOB_STALE_MS) {
+      const staleMs = job.type === "prompt-package" ? PROMPT_JOB_STALE_MS : JOB_STALE_MS;
+      if (!Number.isFinite(updatedAt) || now - updatedAt <= staleMs) {
         return job;
       }
       return {
         ...job,
         status: "failed",
         label: job.label || "任务已超时",
-        error: job.error || "任务超过 2 小时未返回，可能是服务已重启或上游请求中断。",
+        error: job.error || (job.type === "prompt-package"
+          ? "Seedance 提示词生成超过 20 分钟未返回，可能是上游模型超时或服务中断，请重新生成。"
+          : "任务超过 2 小时未返回，可能是服务已重启或上游请求中断。"),
         updatedAt: new Date().toISOString()
       };
     })

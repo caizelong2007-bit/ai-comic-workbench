@@ -625,6 +625,12 @@ function clientJobKeyFromServer(job = {}) {
   if (String(job.scopeId || "").startsWith("shot-assets:")) {
     return packageAssetsJobKey(String(job.scopeId).replace(/^shot-assets:/, ""));
   }
+  if (job.type === "prompt-package") {
+    const scopeId = String(job.scopeId || "");
+    const parts = scopeId.split(":").filter(Boolean);
+    if (parts.length >= 2) return promptJobKeyForEpisode(parts[0], parts.slice(1).join(":"));
+    return promptJobKeyForEpisode(getActiveEpisode()?.id, scopeId);
+  }
   if (job.type === "video-clip") {
     return `video-clip:${job.scopeId || "video-clips"}`;
   }
@@ -1819,7 +1825,8 @@ async function generatePromptPackagesByShot() {
   let done = 0;
   toast(`正在生成分镜提示词 0/${shots.length}`);
   await runClientPool(shots, 2, async (shot) => {
-    setJob(promptJobKey(shot.id), "running", `正在生成 ${shot.id}`);
+    const jobKey = promptJobKeyForEpisode(episode.id, shot.id);
+    setJob(jobKey, "running", `正在生成 ${shot.id}`);
     render();
     try {
       const data = await api.post("/api/generate/prompt-packages", { episodeId: episode.id, shotIds: [shot.id] });
@@ -1830,13 +1837,13 @@ async function generatePromptPackagesByShot() {
       }
       mergePromptPackagesFromState(data.state, episode.id);
       done += 1;
-      setJob(promptJobKey(shot.id), "done", `${shot.id} 完成`);
-      clearJobSoon(promptJobKey(shot.id));
+      setJob(jobKey, "done", `${shot.id} 完成`);
+      clearJobSoon(jobKey);
       toast(`正在生成分镜提示词 ${done}/${shots.length}`);
       render();
     } catch (error) {
-      setJob(promptJobKey(shot.id), "error", `${shot.id} 失败`);
-      clearJobSoon(promptJobKey(shot.id));
+      setJob(jobKey, "error", `${shot.id} 失败`);
+      clearJobSoon(jobKey);
       render();
       throw error;
     }
@@ -2260,7 +2267,11 @@ function assetJobKey(assetId) {
 }
 
 function promptJobKey(shotId) {
-  return `prompt-package:${shotId}`;
+  return promptJobKeyForEpisode(getActiveEpisode()?.id, shotId);
+}
+
+function promptJobKeyForEpisode(episodeId, shotId) {
+  return `prompt-package:${[episodeId, shotId].filter(Boolean).join(":") || "global"}`;
 }
 
 function packageAssetsJobKey(packageId) {
