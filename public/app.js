@@ -23,6 +23,7 @@ const viewMeta = {
 
 const defaultStyleImage = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 160'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%23f4edff'/%3E%3Cstop offset='1' stop-color='%23dff6f2'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='120' height='160' rx='12' fill='url(%23g)'/%3E%3Ccircle cx='36' cy='42' r='18' fill='%238f64df' opacity='.28'/%3E%3Cpath d='M24 118 54 78l18 24 12-15 20 31z' fill='%230f8b8d' opacity='.35'/%3E%3C/svg%3E";
 const maxUploadImageBytes = 15 * 1024 * 1024;
+const maxPromptReferenceAssets = 6;
 
 const els = {};
 let current = {
@@ -46,6 +47,7 @@ let serverJobPollInFlight = false;
 let videoTaskPollTimer = null;
 let videoTaskPollInFlight = false;
 let pendingDelete = null;
+let promptEditor = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -220,11 +222,34 @@ function bindEvents() {
   els.promptDetailModal.addEventListener("click", (event) => {
     if (event.target === els.promptDetailModal) closePromptDetailModal();
     const subshotTab = event.target.closest("[data-subshot-tab]");
-    if (subshotTab) setPromptSubshotTab(subshotTab.dataset.subshotTab);
+    if (subshotTab) {
+      setPromptSubshotTab(subshotTab.dataset.subshotTab);
+      return;
+    }
+    const assetOption = event.target.closest("[data-prompt-asset-option]");
+    if (assetOption) {
+      insertPromptAsset(assetOption.dataset.promptAssetOption);
+      return;
+    }
+    const assetRemove = event.target.closest("[data-remove-prompt-asset]");
+    if (assetRemove) {
+      removePromptAsset(assetRemove.dataset.removePromptAsset);
+      return;
+    }
+    const assetTab = event.target.closest("[data-prompt-asset-tab]");
+    if (assetTab) {
+      setPromptAssetPickerTab(assetTab.dataset.promptAssetTab);
+      return;
+    }
+    const previewToggle = event.target.closest("[data-toggle-request-preview]");
+    if (previewToggle) {
+      togglePromptRequestPreview();
+    }
   });
+  els.promptDetailBody.addEventListener("input", handlePromptEditorInput);
   els.promptDetailCopyBtn.addEventListener("click", () => copyPromptPackage(els.promptDetailCopyBtn.dataset.copyPrompt));
   els.promptDetailExportBtn.addEventListener("click", () => exportPromptPackage(els.promptDetailExportBtn.dataset.exportPrompt));
-  els.promptDetailUseBtn.addEventListener("click", closePromptDetailModal);
+  els.promptDetailUseBtn.addEventListener("click", savePromptPackageEdits);
   els.assetForm.addEventListener("submit", saveManualAsset);
   els.assetImageFileInput.addEventListener("change", loadAssetImageFile);
   els.saveStoryBtn.addEventListener("click", saveStoryScript);
@@ -1008,9 +1033,11 @@ function openPromptDetailModal(packageId) {
     return;
   }
   const shot = (getActiveEpisode()?.shots || []).find((item) => item.id === pack.shotId) || {};
+  promptEditor = createPromptEditorState(pack, shot);
   els.promptDetailBody.innerHTML = renderPromptDetail(pack, shot);
   els.promptDetailCopyBtn.dataset.copyPrompt = pack.id;
   els.promptDetailExportBtn.dataset.exportPrompt = pack.id;
+  els.promptDetailUseBtn.textContent = "保存修改";
   els.promptDetailModal.classList.remove("is-hidden");
 }
 
@@ -1019,6 +1046,7 @@ function closePromptDetailModal() {
   els.promptDetailBody.innerHTML = "";
   els.promptDetailCopyBtn.dataset.copyPrompt = "";
   els.promptDetailExportBtn.dataset.exportPrompt = "";
+  promptEditor = null;
 }
 
 function openEventsModal() {
@@ -1037,6 +1065,216 @@ function setPromptSubshotTab(subshotId) {
   els.promptDetailBody.querySelectorAll("[data-subshot-panel]").forEach((panel) => {
     panel.classList.toggle("is-active", panel.dataset.subshotPanel === subshotId);
   });
+}
+
+function createPromptEditorState(pack = {}, shot = {}) {
+  const referenceAssets = uniqueAssets([
+    ...(pack.assetReferences || []),
+    ...clientAssetCatalog().filter((asset) => (pack.assetRefs || []).includes(asset.id))
+  ]);
+  return {
+    packageId: pack.id,
+    episodeId: getActiveEpisode()?.id || "",
+    shotId: pack.shotId || shot.id || "",
+    pickerTarget: null,
+    pickerType: "character",
+    showRequestPreview: false,
+    assetCatalog: clientAssetCatalog(),
+    selectedRefs: new Set(referenceAssets.map((asset) => asset.id))
+  };
+}
+
+function handlePromptEditorInput(event) {
+  const field = event.target.closest("[data-prompt-field]");
+  if (!field || !promptEditor) return;
+  updatePromptReferenceCounter();
+  if (event.data === "@" || field.value.endsWith("@")) {
+    openPromptAssetPicker(field);
+  }
+}
+
+function openPromptAssetPicker(field) {
+  if (!promptEditor) return;
+  promptEditor.pickerTarget = field.dataset.promptField;
+  promptEditor.pickerType = "character";
+  renderPromptAssetPicker(field);
+}
+
+function renderPromptAssetPicker(field) {
+  const existing = els.promptDetailBody.querySelector(".prompt-asset-picker");
+  if (existing) existing.remove();
+  const picker = document.createElement("div");
+  picker.className = "prompt-asset-picker";
+  picker.innerHTML = renderPromptAssetPickerContent(promptEditor?.pickerType || "character");
+  field.closest(".prompt-edit-row")?.appendChild(picker);
+}
+
+function renderPromptAssetPickerContent(activeType = "character") {
+  const types = [["character", "角色"], ["location", "场景"], ["prop", "道具"]];
+  const assets = (promptEditor?.assetCatalog || []).filter((asset) => normalizeAssetType(asset.type) === normalizeAssetType(activeType));
+  return `
+    <div class="prompt-picker-tabs">
+      ${types.map(([type, label]) => `<button class="${normalizeAssetType(activeType) === type ? "is-active" : ""}" type="button" data-prompt-asset-tab="${escapeAttr(type)}">${escapeHtml(label)}</button>`).join("")}
+    </div>
+    <div class="prompt-picker-list">
+      ${assets.map((asset) => `
+        <button type="button" data-prompt-asset-option="${escapeAttr(asset.id)}">
+          ${asset.imageUrl ? `<img src="${escapeAttr(asset.imageUrl)}" alt="${escapeAttr(asset.name || asset.id)}">` : `<span>${escapeHtml((asset.name || asset.id || "?").slice(0, 1))}</span>`}
+          <b>${escapeHtml(asset.name || asset.id)}</b>
+        </button>
+      `).join("") || `<p>暂无${escapeHtml(assetTypeLabel(activeType))}资产</p>`}
+    </div>
+  `;
+}
+
+function setPromptAssetPickerTab(type) {
+  if (!promptEditor) return;
+  promptEditor.pickerType = normalizeAssetType(type);
+  const picker = els.promptDetailBody.querySelector(".prompt-asset-picker");
+  if (picker) picker.innerHTML = renderPromptAssetPickerContent(promptEditor.pickerType);
+}
+
+function insertPromptAsset(assetId) {
+  if (!promptEditor?.pickerTarget || !assetId) return;
+  const field = promptFieldByKey(promptEditor.pickerTarget);
+  const asset = findClientAsset(assetId);
+  if (!field || !asset) return;
+  const token = `@${asset.id} ${asset.name || asset.id}`;
+  const start = field.selectionStart ?? field.value.length;
+  const end = field.selectionEnd ?? field.value.length;
+  const nextValue = field.value[start - 1] === "@"
+    ? `${field.value.slice(0, start - 1)}${token}${field.value.slice(end)}`
+    : field.value.endsWith("@") ? `${field.value.slice(0, -1)}${token}` : insertAtCursor(field, token);
+  field.value = nextValue;
+  addPromptFieldAsset(field, assetId);
+  promptEditor.selectedRefs.add(assetId);
+  field.focus();
+  field.setSelectionRange(field.value.length, field.value.length);
+  els.promptDetailBody.querySelector(".prompt-asset-picker")?.remove();
+  updatePromptReferenceCounter();
+}
+
+function insertAtCursor(field, text) {
+  const start = field.selectionStart ?? field.value.length;
+  const end = field.selectionEnd ?? field.value.length;
+  return `${field.value.slice(0, start)}${text}${field.value.slice(end)}`;
+}
+
+function addPromptFieldAsset(field, assetId) {
+  const refs = new Set(promptFieldRefs(field));
+  refs.add(assetId);
+  field.dataset.assetRefs = [...refs].join(",");
+  renderPromptFieldRefs(field);
+}
+
+function removePromptAsset(target) {
+  const [fieldKey, assetId] = String(target || "").split("||");
+  const field = promptFieldByKey(fieldKey || "");
+  if (!field || !assetId) return;
+  const refs = promptFieldRefs(field).filter((id) => id !== assetId);
+  field.dataset.assetRefs = refs.join(",");
+  renderPromptFieldRefs(field);
+  updatePromptReferenceCounter();
+}
+
+function promptFieldByKey(key) {
+  return [...els.promptDetailBody.querySelectorAll("[data-prompt-field]")]
+    .find((field) => field.dataset.promptField === key) || null;
+}
+
+function promptFieldRefs(field) {
+  return String(field?.dataset.assetRefs || "").split(",").map((id) => id.trim()).filter(Boolean);
+}
+
+function renderPromptFieldRefs(field) {
+  const box = field.closest(".prompt-edit-row")?.querySelector("[data-prompt-field-assets]");
+  if (!box) return;
+  const fieldKey = field.dataset.promptField;
+  const refs = promptFieldRefs(field).map(findClientAsset).filter(Boolean);
+  box.innerHTML = refs.map((asset) => renderPromptRefToken(fieldKey, asset)).join("");
+}
+
+function updatePromptReferenceCounter() {
+  if (!promptEditor) return;
+  const refs = collectPromptEditorRefs();
+  promptEditor.selectedRefs = new Set(refs);
+  const counter = els.promptDetailBody.querySelector("[data-prompt-ref-counter]");
+  if (counter) {
+    counter.textContent = `参考对象 ${refs.length}/${maxPromptReferenceAssets}`;
+    counter.classList.toggle("is-over", refs.length > maxPromptReferenceAssets);
+  }
+}
+
+function collectPromptEditorRefs() {
+  const refs = [];
+  els.promptDetailBody.querySelectorAll("[data-prompt-field]").forEach((field) => {
+    refs.push(...promptFieldRefs(field));
+  });
+  return [...new Set(refs)];
+}
+
+function togglePromptRequestPreview() {
+  if (!promptEditor) return;
+  promptEditor.showRequestPreview = !promptEditor.showRequestPreview;
+  const preview = els.promptDetailBody.querySelector("[data-request-preview-panel]");
+  const button = els.promptDetailBody.querySelector("[data-toggle-request-preview]");
+  if (preview) preview.classList.toggle("is-hidden", !promptEditor.showRequestPreview);
+  if (button) button.textContent = promptEditor.showRequestPreview ? "隐藏实际提交内容" : "查看实际提交内容";
+}
+
+async function savePromptPackageEdits() {
+  if (!promptEditor?.packageId) {
+    closePromptDetailModal();
+    return;
+  }
+  const payload = readPromptEditorPayload();
+  await withBusy(`prompt-edit:${promptEditor.packageId}`, async () => {
+    const data = await api.post("/api/prompt-packages/save", payload);
+    applyServerData(data);
+    render();
+    closePromptDetailModal();
+    toast("分镜提示词已保存，相关视频已标记为提示词已更新");
+  }, "保存分镜提示词失败");
+}
+
+function readPromptEditorPayload() {
+  const fields = new Map([...els.promptDetailBody.querySelectorAll("[data-prompt-field]")].map((field) => [field.dataset.promptField, field]));
+  const read = (key) => fields.get(key)?.value.trim() || "";
+  const refs = (key) => promptFieldRefs(fields.get(key));
+  const pack = (getActiveEpisode()?.promptPackages || []).find((item) => item.id === promptEditor.packageId) || {};
+  const audio = (pack.audio || []).map((row, index) => ({
+    content: read(`audio:${index}`),
+    assetRefs: refs(`audio:${index}`)
+  }));
+  const dialogue = (pack.dialogue || []).map((row, index) => ({
+    speakerAssetId: [...refs(`dialogueText:${index}`), ...refs(`dialogueVoice:${index}`)][0] || row.speakerAssetId || "",
+    voice: read(`dialogueVoice:${index}`),
+    text: read(`dialogueText:${index}`)
+  }));
+  const subShots = (pack.subShots || []).map((subShot, index) => ({
+    id: subShot.id,
+    cameraLanguage: read(`subShot:${index}:cameraLanguage`),
+    blocking: read(`subShot:${index}:blocking`),
+    composition: read(`subShot:${index}:composition`),
+    action: read(`subShot:${index}:action`),
+    assetRefs: [
+      ...refs(`subShot:${index}:cameraLanguage`),
+      ...refs(`subShot:${index}:blocking`),
+      ...refs(`subShot:${index}:composition`),
+      ...refs(`subShot:${index}:action`)
+    ]
+  }));
+  return {
+    episodeId: promptEditor.episodeId,
+    packageId: promptEditor.packageId,
+    package: {
+      soundDesign: read("soundDesign"),
+      audio,
+      dialogue,
+      subShots,
+      assetRefs: collectPromptEditorRefs()
+    }
+  };
 }
 
 async function saveManualAsset(event) {
@@ -2509,7 +2747,7 @@ function renderShotVideoPanel(shot = {}, pack = null, video = {}) {
 function videoIsStale(video = {}, pack = null) {
   if (!video?.id || !pack) return false;
   if (video.stale === true) return true;
-  const packTime = Date.parse(pack.createdAt || "");
+  const packTime = Date.parse(pack.updatedAt || pack.manualEditedAt || pack.createdAt || "");
   const videoTime = Date.parse(video.createdAt || "");
   return Number.isFinite(packTime) && Number.isFinite(videoTime) && packTime > videoTime;
 }
@@ -2637,45 +2875,6 @@ function renderPromptSummary(pack, shot, assets = []) {
   `;
 }
 
-function renderPromptDetail(pack, shot = {}) {
-  const subShots = pack.subShots || [];
-  return `
-    <section class="prompt-detail-section">
-      <h3>${escapeHtml(pack.shotId || shot.id || "分镜")} ${escapeHtml(pack.title || "")}</h3>
-      <p>${escapeHtml(shot.action || "")}</p>
-    </section>
-    <section class="prompt-detail-section">
-      <h3>分镜音效</h3>
-      ${renderPromptTextBlock(pack.soundDesign || "未生成音效描述", pack.audio || [], pack.assetReferences || [])}
-    </section>
-    <section class="prompt-detail-section">
-      <h3>分镜台词</h3>
-      ${renderPromptDialogueBlock(pack.dialogue || [], pack.assetReferences || [])}
-    </section>
-    <section class="prompt-detail-section">
-      <h3>分镜提示词</h3>
-      <div class="subshot-tab-row">
-        ${subShots.map((subShot, index) => `<button type="button" class="${index === 0 ? "is-active" : ""}" data-subshot-tab="${escapeAttr(subShot.id)}">${escapeHtml(`细分镜头${index + 1} (${subShot.timeRange || ""})`)}</button>`).join("")}
-      </div>
-      <div class="prompt-detail-list">
-        ${subShots.map((subShot, index) => `
-          <article class="${index === 0 ? "is-active" : ""}" data-subshot-panel="${escapeAttr(subShot.id)}">
-            <strong>${escapeHtml(subShot.id)} · ${escapeHtml(subShot.timeRange)}</strong>
-            <p><b>镜头语言：</b>${renderInlineAssetMentions(subShot.cameraLanguage, subShot.assetRefs || [], pack.assetReferences || [])}</p>
-            <p><b>站位：</b>${renderInlineAssetMentions(subShot.blocking, subShot.assetRefs || [], pack.assetReferences || [])}</p>
-            <p><b>构图运镜：</b>${renderInlineAssetMentions(subShot.composition, subShot.assetRefs || [], pack.assetReferences || [])}</p>
-            <p><b>动作：</b>${renderInlineAssetMentions(subShot.action, subShot.assetRefs || [], pack.assetReferences || [])}</p>
-          </article>
-        `).join("") || `<article><p>暂无细分镜头。</p></article>`}
-      </div>
-    </section>
-    <section class="prompt-detail-section">
-      <h3>Seedance Prompt</h3>
-      <pre>${escapeHtml(pack.seedancePrompt || "")}</pre>
-    </section>
-  `;
-}
-
 function renderPromptTextBlock(text, rows = [], assets = []) {
   if (!rows.length) return `<p>${escapeHtml(text)}</p>`;
   const summaryRefs = uniqueAssets(rows.flatMap((row) => row.assetRefs || [])).map((asset) => asset.id);
@@ -2687,6 +2886,132 @@ function renderPromptDialogueBlock(rows = [], assets = []) {
   return rows.map((row) => `
     <p><b>${escapeHtml(row.timeRange || "")}</b> ${renderAssetMention(findAssetForMention(row.speakerAssetId, assets))} ${escapeHtml(row.voice || "")}：${escapeHtml(row.text || "")}</p>
   `).join("");
+}
+
+function renderPromptDetail(pack, shot = {}) {
+  const subShots = pack.subShots || [];
+  const refs = promptEditorReferenceAssets(pack);
+  return `
+    <section class="prompt-detail-section">
+      <div class="prompt-editor-meta">
+        <div>
+          <h3>${escapeHtml(pack.shotId || shot.id || "分镜")} ${escapeHtml(pack.title || "")}</h3>
+          <p>${escapeHtml(shot.action || "")}</p>
+        </div>
+        <span class="prompt-ref-counter ${refs.length > maxPromptReferenceAssets ? "is-over" : ""}" data-prompt-ref-counter>参考对象 ${escapeHtml(refs.length)}/${escapeHtml(maxPromptReferenceAssets)}</span>
+      </div>
+      ${refs.length > maxPromptReferenceAssets ? `<p class="warning-text">视频生成最多使用 ${escapeHtml(maxPromptReferenceAssets)} 个参考图，请优先保留角色、场景和关键道具。</p>` : ""}
+    </section>
+    <section class="prompt-detail-section">
+      <h3>分镜音效</h3>
+      ${renderPromptEditRow({
+        key: "soundDesign",
+        label: "整体音效",
+        value: pack.soundDesign || "",
+        refs: uniqueAssetIds((pack.audio || []).flatMap((row) => row.assetRefs || [])),
+        multiline: true
+      })}
+      ${(pack.audio || []).map((row, index) => renderPromptEditRow({
+        key: `audio:${index}`,
+        label: row.timeRange || "音效",
+        value: row.content || "",
+        refs: row.assetRefs || [],
+        multiline: true
+      })).join("") || `<p class="muted-text">暂无音效时间轴。</p>`}
+    </section>
+    <section class="prompt-detail-section">
+      <h3>分镜台词</h3>
+      ${(pack.dialogue || []).map((row, index) => `
+        <div class="prompt-dialogue-editor">
+          <strong>${escapeHtml(row.timeRange || "台词")}</strong>
+          ${renderPromptEditRow({
+            key: `dialogueVoice:${index}`,
+            label: "声音",
+            value: row.voice || "",
+            refs: row.speakerAssetId ? [row.speakerAssetId] : []
+          })}
+          ${renderPromptEditRow({
+            key: `dialogueText:${index}`,
+            label: "文案",
+            value: row.text || "",
+            refs: row.speakerAssetId ? [row.speakerAssetId] : [],
+            multiline: true
+          })}
+        </div>
+      `).join("") || `<p class="muted-text">暂无台词。</p>`}
+    </section>
+    <section class="prompt-detail-section">
+      <h3>分镜提示词</h3>
+      <div class="subshot-tab-row">
+        ${subShots.map((subShot, index) => `<button type="button" class="${index === 0 ? "is-active" : ""}" data-subshot-tab="${escapeAttr(subShot.id)}">${escapeHtml(`细分镜头${index + 1} (${subShot.timeRange || ""})`)}</button>`).join("")}
+      </div>
+      <div class="prompt-detail-list">
+        ${subShots.map((subShot, index) => `
+          <article class="${index === 0 ? "is-active" : ""}" data-subshot-panel="${escapeAttr(subShot.id)}">
+            <strong>${escapeHtml(subShot.id)} · ${escapeHtml(subShot.timeRange)}</strong>
+            ${renderPromptEditRow({ key: `subShot:${index}:cameraLanguage`, label: "镜头语言", value: subShot.cameraLanguage || "", refs: subShot.assetRefs || [], multiline: true })}
+            ${renderPromptEditRow({ key: `subShot:${index}:blocking`, label: "站位", value: subShot.blocking || "", refs: subShot.assetRefs || [], multiline: true })}
+            ${renderPromptEditRow({ key: `subShot:${index}:composition`, label: "构图运镜", value: subShot.composition || "", refs: subShot.assetRefs || [], multiline: true })}
+            ${renderPromptEditRow({ key: `subShot:${index}:action`, label: "动作", value: subShot.action || "", refs: subShot.assetRefs || [], multiline: true })}
+          </article>
+        `).join("") || `<article><p>暂无细分镜头。</p></article>`}
+      </div>
+    </section>
+    <section class="prompt-detail-section prompt-request-preview">
+      <button type="button" data-toggle-request-preview>查看实际提交内容</button>
+      <pre class="is-hidden" data-request-preview-panel>${escapeHtml(buildFinalSeedancePrompt(
+        { ...pack, seedancePrompt: "" },
+        shot,
+        refs,
+        pack.audio || [],
+        pack.dialogue || [],
+        (pack.subShots || []).map((subShot) => ({ ...subShot, seedanceText: buildSubShotSeedanceText(subShot, refs) }))
+      ))}</pre>
+    </section>
+  `;
+}
+
+function promptEditorReferenceAssets(pack = {}) {
+  const refs = [
+    ...(pack.assetRefs || []),
+    ...(pack.audio || []).flatMap((row) => row.assetRefs || []),
+    ...(pack.dialogue || []).map((row) => row.speakerAssetId).filter(Boolean),
+    ...(pack.subShots || []).flatMap((subShot) => subShot.assetRefs || [])
+  ];
+  return uniqueAssets(refs.map((id) => findClientAsset(id)).filter(Boolean));
+}
+
+function renderPromptEditRow({ key, label, value, refs = [], multiline = false }) {
+  const uniqueRefs = uniqueAssetIds(refs).filter((id) => findClientAsset(id));
+  const attrs = `data-prompt-field="${escapeAttr(key)}" data-asset-refs="${escapeAttr(uniqueRefs.join(","))}" placeholder="输入 @ 可添加参考对象"`;
+  return `
+    <div class="prompt-edit-row">
+      <label>
+        <span>${escapeHtml(label)}</span>
+        ${multiline
+          ? `<textarea ${attrs} rows="3">${escapeHtml(value || "")}</textarea>`
+          : `<input ${attrs} value="${escapeAttr(value || "")}">`}
+      </label>
+      <div class="prompt-field-assets" data-prompt-field-assets>
+        ${uniqueRefs.map((id) => renderPromptRefToken(key, findClientAsset(id))).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderPromptRefToken(fieldKey, asset = {}) {
+  if (!asset?.id) return "";
+  return `
+    <span class="prompt-ref-token">
+      ${asset.imageUrl ? `<img src="${escapeAttr(asset.imageUrl)}" alt="${escapeAttr(asset.name || asset.id)}">` : ""}
+      <b>${escapeHtml(assetTypeLabel(asset.type))}</b>${escapeHtml(asset.name || asset.id)}
+      <button type="button" data-remove-prompt-asset="${escapeAttr(`${fieldKey}||${asset.id}`)}" aria-label="移除">×</button>
+    </span>
+  `;
+}
+
+function uniqueAssetIds(ids = []) {
+  return [...new Set((ids || []).map((id) => String(id || "").trim()).filter(Boolean))];
 }
 
 function renderAssetMentions(assets = []) {

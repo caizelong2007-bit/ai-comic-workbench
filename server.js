@@ -16,7 +16,7 @@ const PROJECTS_PATH = path.join(DATA_DIR, "projects.json");
 const MODEL_CENTER_PATH = path.join(DATA_DIR, "models.json");
 const PORT = Number(process.env.PORT || 8800);
 const MAX_JSON_BODY_BYTES = 24 * 1024 * 1024;
-const MAX_SHOT_ASSET_REFS = 4;
+const MAX_SHOT_ASSET_REFS = 6;
 const JOB_STALE_MS = 2 * 60 * 60 * 1000;
 let stateWriteQueue = Promise.resolve();
 const apimartUploadCache = new Map();
@@ -133,8 +133,8 @@ const DEFAULT_CONFIG = {
       type: "video",
       promptSchema: "seedance-prompt-package-v1",
       requestBuilder: "seedance",
-      maxReferenceImages: 4,
-      description: "15s 分镜提示词 + 最多 4 张资产参考图。"
+      maxReferenceImages: 6,
+      description: "15s 分镜提示词 + 最多 6 张资产参考图。"
     }
   ]
 };
@@ -322,6 +322,11 @@ async function route(req, res) {
   if (pathname === "/api/assets/delete" && req.method === "POST") {
     const body = await readBody(req);
     return sendJson(res, 200, await deleteAsset(body.assetId || body.id));
+  }
+
+  if (pathname === "/api/prompt-packages/save" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await savePromptPackageEdits(body));
   }
 
   if (pathname === "/api/reset" && req.method === "POST") {
@@ -720,6 +725,106 @@ async function generatePromptPackages(payload = {}) {
     });
     throw error;
   }
+}
+
+async function savePromptPackageEdits(payload = {}) {
+  const packageId = stringOr(payload.packageId || payload.id, "");
+  if (!packageId) {
+    throw new Error("Missing prompt package id");
+  }
+  const latestState = await withStateWriteLock(async () => {
+    const state = await readState();
+    const episode = payload.episodeId
+      ? (state.episodes || []).find((item) => item.id === payload.episodeId)
+      : requireActiveEpisode(state);
+    if (!episode) {
+      throw new Error("Episode not found");
+    }
+    const index = (episode.promptPackages || []).findIndex((pack) => pack.id === packageId);
+    if (index < 0) {
+      throw new Error("Prompt package not found");
+    }
+    const assets = flattenCards(state.cards);
+    const validAssetIds = new Set(assets.map((asset) => asset.id));
+    const currentPack = episode.promptPackages[index];
+    const updatedAt = new Date().toISOString();
+    const edited = mergePromptPackageEdits(currentPack, payload.package || payload, validAssetIds, updatedAt);
+    episode.promptPackages[index] = hydratePromptPackageReferences([edited], state.cards, state.assetImages || [])[0];
+    episode.videos = (episode.videos || []).map((video) => video.shotId === currentPack.shotId
+      ? {
+        ...video,
+        stale: true,
+        staleReason: "prompt-manual-edit",
+        staleAt: updatedAt
+      }
+      : video);
+    touchEpisode(episode);
+    touchState(state);
+    addEvent(state, "promptPackage.edited", `${episode.title} 已人工修改 ${currentPack.shotId || packageId} Seedance 分镜提示词`, "user");
+    await writeState(state);
+    await syncActiveProject({ state });
+    return state;
+  });
+  return { ok: true, state: latestState };
+}
+
+function mergePromptPackageEdits(currentPack = {}, patch = {}, validAssetIds = new Set(), updatedAt = new Date().toISOString()) {
+  const audioPatch = Array.isArray(patch.audio) ? patch.audio : [];
+  const dialoguePatch = Array.isArray(patch.dialogue) ? patch.dialogue : [];
+  const subShotPatch = Array.isArray(patch.subShots) ? patch.subShots : [];
+  const audio = (currentPack.audio || []).map((row, index) => {
+    const next = audioPatch[index] || {};
+    return {
+      ...row,
+      content: editableString(next.content, row.content || ""),
+      assetRefs: filterAssetRefs(next.assetRefs || next.asset_refs || row.assetRefs || [], validAssetIds)
+    };
+  });
+  const dialogue = (currentPack.dialogue || []).map((row, index) => {
+    const next = dialoguePatch[index] || {};
+    const speakerAssetId = validAssetIds.has(next.speakerAssetId)
+      ? next.speakerAssetId
+      : validAssetIds.has(next.speaker_asset_id) ? next.speaker_asset_id : row.speakerAssetId || "";
+    return {
+      ...row,
+      speakerAssetId,
+      voice: editableString(next.voice, row.voice || ""),
+      text: editableString(next.text, row.text || "")
+    };
+  });
+  const subShots = (currentPack.subShots || []).map((subShot, index) => {
+    const next = subShotPatch.find((item) => item?.id && item.id === subShot.id) || subShotPatch[index] || {};
+    return {
+      ...subShot,
+      cameraLanguage: editableString(next.cameraLanguage, subShot.cameraLanguage || ""),
+      blocking: editableString(next.blocking, subShot.blocking || ""),
+      composition: editableString(next.composition, subShot.composition || ""),
+      action: editableString(next.action, subShot.action || ""),
+      assetRefs: filterAssetRefs(next.assetRefs || next.asset_refs || subShot.assetRefs || [], validAssetIds)
+    };
+  });
+  const assetRefs = filterAssetRefs([
+    ...(patch.assetRefs || patch.asset_refs || []),
+    ...audio.flatMap((row) => row.assetRefs || []),
+    ...dialogue.map((row) => row.speakerAssetId).filter(Boolean),
+    ...subShots.flatMap((subShot) => subShot.assetRefs || [])
+  ], validAssetIds);
+  const edited = {
+    ...currentPack,
+    soundDesign: editableString(patch.soundDesign, currentPack.soundDesign || ""),
+    audio,
+    dialogue,
+    subShots,
+    assetRefs,
+    manualEditedAt: updatedAt,
+    updatedAt
+  };
+  edited.seedancePrompt = "";
+  return edited;
+}
+
+function editableString(value, fallback = "") {
+  return Object.prototype.hasOwnProperty.call({ value }, "value") && typeof value === "string" ? value.trim() : String(fallback || "");
 }
 
 async function doGeneratePromptPackages(payload = {}) {
@@ -1190,7 +1295,7 @@ function buildSeedanceVideoPayload(config = DEFAULT_CONFIG, adapter = {}, prompt
   };
   const publicUrls = normalizeSeedanceReferenceImages(referenceImages).map((item) => item.remoteUrl || item.url).filter(Boolean);
   if (publicUrls.length) {
-    payload.image_urls = publicUrls.slice(0, Number(adapter.maxReferenceImages || 9));
+    payload.image_urls = publicUrls.slice(0, Math.min(MAX_SHOT_ASSET_REFS, Number(adapter.maxReferenceImages || MAX_SHOT_ASSET_REFS)));
   }
   return payload;
 }
@@ -4149,8 +4254,10 @@ function normalizeVideoProfiles(current = {}, next = {}) {
         type: stringOr(profile.type, "video"),
         promptSchema: stringOr(profile.promptSchema, "seedance-prompt-package-v1"),
         requestBuilder: stringOr(profile.requestBuilder, id === DEFAULT_VIDEO_PROFILE_ID ? "seedance" : "custom"),
-        maxReferenceImages: Number(profile.maxReferenceImages || MAX_SHOT_ASSET_REFS),
-        description: stringOr(profile.description, "")
+        maxReferenceImages: profile.id === DEFAULT_VIDEO_PROFILE_ID
+          ? Math.max(MAX_SHOT_ASSET_REFS, Number(profile.maxReferenceImages || 0))
+          : Number(profile.maxReferenceImages || MAX_SHOT_ASSET_REFS),
+        description: id === DEFAULT_VIDEO_PROFILE_ID ? `15s 分镜提示词 + 最多 ${MAX_SHOT_ASSET_REFS} 张资产参考图。` : stringOr(profile.description, "")
       });
     }
   };
