@@ -2313,7 +2313,8 @@ legend {
 }
 
 .prompt-edit-row textarea,
-.prompt-edit-row input {
+.prompt-edit-row input,
+.prompt-inline-editor {
   width: 100%;
   border: 0;
   border-radius: 6px;
@@ -2322,9 +2323,22 @@ legend {
   font: inherit;
 }
 
-.prompt-edit-row textarea {
+.prompt-edit-row textarea,
+.prompt-inline-editor.is-multiline {
   min-height: 74px;
-  resize: vertical;
+}
+
+.prompt-inline-editor {
+  min-height: 38px;
+  padding: 9px 10px;
+  outline: none;
+  line-height: 1.8;
+  white-space: pre-wrap;
+}
+
+.prompt-inline-editor:empty::before {
+  content: attr(data-placeholder);
+  color: #a7afbc;
 }
 
 .prompt-dialogue-editor {
@@ -2332,14 +2346,8 @@ legend {
   gap: 8px;
 }
 
-.prompt-field-assets {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding-left: 102px;
-}
-
-.prompt-ref-token {
+.prompt-ref-token,
+.prompt-inline-token {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -2352,20 +2360,24 @@ legend {
   color: #8b63d8;
   font-size: 12px;
   font-weight: 900;
+  vertical-align: middle;
 }
 
-.prompt-ref-token img {
+.prompt-ref-token img,
+.prompt-inline-token img {
   width: 22px;
   height: 22px;
   border-radius: 4px;
   object-fit: cover;
 }
 
-.prompt-ref-token b {
+.prompt-ref-token b,
+.prompt-inline-token b {
   color: #a77be8;
 }
 
-.prompt-ref-token button {
+.prompt-ref-token button,
+.prompt-inline-token button {
   min-width: 20px;
   min-height: 20px;
   padding: 0;
