@@ -16,8 +16,9 @@ const PROJECTS_PATH = path.join(DATA_DIR, "projects.json");
 const MODEL_CENTER_PATH = path.join(DATA_DIR, "models.json");
 const PORT = Number(process.env.PORT || 8800);
 const MAX_JSON_BODY_BYTES = 24 * 1024 * 1024;
-const MAX_SHOT_ASSET_REFS = 4;
+const MAX_SHOT_ASSET_REFS = 6;
 const JOB_STALE_MS = 2 * 60 * 60 * 1000;
+const PROMPT_JOB_STALE_MS = 20 * 60 * 1000;
 let stateWriteQueue = Promise.resolve();
 const apimartUploadCache = new Map();
 
@@ -133,8 +134,8 @@ const DEFAULT_CONFIG = {
       type: "video",
       promptSchema: "seedance-prompt-package-v1",
       requestBuilder: "seedance",
-      maxReferenceImages: 4,
-      description: "15s 分镜提示词 + 最多 4 张资产参考图。"
+      maxReferenceImages: 6,
+      description: "15s 分镜提示词 + 最多 6 张资产参考图。"
     }
   ]
 };
@@ -266,6 +267,11 @@ async function route(req, res) {
     return sendJson(res, 200, await openProject(body.projectId || body.id));
   }
 
+  if (pathname === "/api/projects/delete" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await deleteProject(body.projectId || body.id));
+  }
+
   if (pathname === "/api/story-script" && req.method === "POST") {
     const body = await readBody(req);
     return sendJson(res, 200, await updateStoryScript(body));
@@ -279,6 +285,11 @@ async function route(req, res) {
   if (pathname === "/api/episodes/open" && req.method === "POST") {
     const body = await readBody(req);
     return sendJson(res, 200, await openEpisode(body.episodeId || body.id));
+  }
+
+  if (pathname === "/api/episodes/delete" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await deleteEpisode(body.episodeId || body.id));
   }
 
   if (pathname === "/api/episodes/script" && req.method === "POST") {
@@ -307,6 +318,21 @@ async function route(req, res) {
   if (pathname === "/api/assets/manual" && req.method === "POST") {
     const body = await readBody(req);
     return sendJson(res, 200, await saveManualAsset(body));
+  }
+
+  if (pathname === "/api/assets/delete" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await deleteAsset(body.assetId || body.id));
+  }
+
+  if (pathname === "/api/prompt-packages/save" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await savePromptPackageEdits(body));
+  }
+
+  if (pathname === "/api/shots/save" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await saveShotEdits(body));
   }
 
   if (pathname === "/api/reset" && req.method === "POST") {
@@ -361,6 +387,10 @@ async function route(req, res) {
 
   if (pathname.startsWith("/cache/")) {
     return serveStatic(res, pathname, CACHE_DIR, "/cache/");
+  }
+
+  if (pathname === "/api" || pathname.startsWith("/api/")) {
+    return sendJson(res, 404, { ok: false, error: "API route not found" });
   }
 
   return serveStatic(res, pathname === "/" ? "/index.html" : pathname, PUBLIC_DIR, "/");
@@ -678,7 +708,7 @@ async function generatePromptPackages(payload = {}) {
   const requestedIds = new Set(Array.isArray(payload.shotIds) ? payload.shotIds : []);
   const singleShotId = requestedIds.size === 1 ? [...requestedIds][0] : "";
   const type = singleShotId ? "prompt-package" : "generate";
-  const scopeId = singleShotId || "prompt-packages";
+  const scopeId = promptPackageJobScope(payload.episodeId, singleShotId);
   const existing = await getRunningJobSnapshot(type, scopeId);
   if (existing) {
     return { ok: true, state: existing.state, job: existing.job, duplicate: true };
@@ -703,6 +733,321 @@ async function generatePromptPackages(payload = {}) {
   }
 }
 
+function promptPackageJobScope(episodeId = "", shotId = "") {
+  const shotScope = String(shotId || "").trim();
+  if (!shotScope) return "prompt-packages";
+  const episodeScope = String(episodeId || "").trim();
+  return episodeScope ? `${episodeScope}:${shotScope}` : shotScope;
+}
+
+async function saveShotEdits(payload = {}) {
+  const shotId = stringOr(payload.shotId || payload.id, "");
+  if (!shotId) {
+    throw new Error("Missing shot id");
+  }
+  const latestState = await withStateWriteLock(async () => {
+    const state = await readState();
+    const episode = payload.episodeId
+      ? (state.episodes || []).find((item) => item.id === payload.episodeId)
+      : requireActiveEpisode(state);
+    if (!episode) {
+      throw new Error("Episode not found");
+    }
+    const index = (episode.shots || []).findIndex((shot) => shot.id === shotId);
+    if (index < 0) {
+      throw new Error("Shot not found");
+    }
+    const updatedAt = new Date().toISOString();
+    const currentShot = episode.shots[index];
+    const edited = mergeShotEdits(currentShot, payload.shot || payload, updatedAt);
+    episode.shots[index] = edited;
+    episode.promptPackages = (episode.promptPackages || []).map((pack) => pack.shotId === shotId
+      ? {
+        ...pack,
+        stale: true,
+        staleReason: "shot-manual-edit",
+        staleAt: updatedAt
+      }
+      : pack);
+    episode.videos = (episode.videos || []).map((video) => video.shotId === shotId
+      ? {
+        ...video,
+        stale: true,
+        staleReason: "shot-manual-edit",
+        staleAt: updatedAt
+      }
+      : video);
+    touchEpisode(episode);
+    touchState(state);
+    addEvent(state, "shot.edited", `${episode.title} 已人工修改 ${shotId} 分镜脚本`, "user");
+    await writeState(state);
+    await syncActiveProject({ state });
+    return state;
+  });
+  return { ok: true, state: latestState };
+}
+
+function mergeShotEdits(currentShot = {}, patch = {}, updatedAt = new Date().toISOString()) {
+  const next = {
+    ...currentShot,
+    shotType: editableString(patch.shotType, currentShot.shotType || ""),
+    camera: editableString(patch.camera, currentShot.camera || ""),
+    action: editableString(patch.action, currentShot.action || ""),
+    dialogue: editableString(patch.dialogue, currentShot.dialogue || ""),
+    assetNotes: editableString(patch.assetNotes, currentShot.assetNotes || ""),
+    visualNotes: editableString(patch.visualNotes, currentShot.visualNotes || ""),
+    continuity: editableString(patch.continuity, currentShot.continuity || ""),
+    manualEditedAt: updatedAt,
+    updatedAt
+  };
+  if (Object.prototype.hasOwnProperty.call(patch, "sceneId")) {
+    next.sceneId = editableString(patch.sceneId, currentShot.sceneId || "");
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "imagePrompt")) {
+    next.imagePrompt = editableString(patch.imagePrompt, currentShot.imagePrompt || "");
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "videoPrompt")) {
+    next.videoPrompt = editableString(patch.videoPrompt, currentShot.videoPrompt || "");
+  }
+  return {
+    ...next,
+    id: currentShot.id,
+    order: currentShot.order,
+    durationSec: 15,
+    assetRefs: Array.isArray(currentShot.assetRefs) ? currentShot.assetRefs : []
+  };
+}
+
+function isPromptPackageStale(pack = {}) {
+  return pack.stale === true || Boolean(pack.staleReason);
+}
+
+async function savePromptPackageEdits(payload = {}) {
+  const packageId = stringOr(payload.packageId || payload.id, "");
+  if (!packageId) {
+    throw new Error("Missing prompt package id");
+  }
+  const latestState = await withStateWriteLock(async () => {
+    const state = await readState();
+    const episode = payload.episodeId
+      ? (state.episodes || []).find((item) => item.id === payload.episodeId)
+      : requireActiveEpisode(state);
+    if (!episode) {
+      throw new Error("Episode not found");
+    }
+    const index = (episode.promptPackages || []).findIndex((pack) => pack.id === packageId);
+    if (index < 0) {
+      throw new Error("Prompt package not found");
+    }
+    const assets = flattenCards(state.cards);
+    const validAssetIds = new Set(assets.map((asset) => asset.id));
+    const currentPack = episode.promptPackages[index];
+    const updatedAt = new Date().toISOString();
+    const edited = mergePromptPackageEdits(currentPack, payload.package || payload, validAssetIds, updatedAt);
+    episode.promptPackages[index] = hydratePromptPackageReferences([edited], state.cards, state.assetImages || [])[0];
+    episode.videos = (episode.videos || []).map((video) => video.shotId === currentPack.shotId
+      ? {
+        ...video,
+        stale: true,
+        staleReason: "prompt-manual-edit",
+        staleAt: updatedAt
+      }
+      : video);
+    touchEpisode(episode);
+    touchState(state);
+    addEvent(state, "promptPackage.edited", `${episode.title} 已人工修改 ${currentPack.shotId || packageId} Seedance 分镜提示词`, "user");
+    await writeState(state);
+    await syncActiveProject({ state });
+    return state;
+  });
+  return { ok: true, state: latestState };
+}
+
+function mergePromptPackageEdits(currentPack = {}, patch = {}, validAssetIds = new Set(), updatedAt = new Date().toISOString()) {
+  const audioPatch = Array.isArray(patch.audio) ? patch.audio : [];
+  const dialoguePatch = Array.isArray(patch.dialogue) ? patch.dialogue : [];
+  const subShotPatch = Array.isArray(patch.subShots) ? patch.subShots : [];
+  const audio = (currentPack.audio || []).map((row, index) => {
+    const next = audioPatch[index] || {};
+    return {
+      ...row,
+      content: editableString(next.content, row.content || ""),
+      assetRefs: filterAssetRefs(readPatchArray(next, "assetRefs", "asset_refs", row.assetRefs || []), validAssetIds)
+    };
+  });
+  const dialogue = (currentPack.dialogue || []).map((row, index) => {
+    const next = dialoguePatch[index] || {};
+    const speakerAssetId = readPatchAssetId(next, "speakerAssetId", "speaker_asset_id", row.speakerAssetId || "", validAssetIds);
+    return {
+      ...row,
+      speakerAssetId,
+      voice: editableString(next.voice, row.voice || ""),
+      text: editableString(next.text, row.text || "")
+    };
+  });
+  const subShots = (currentPack.subShots || []).map((subShot, index) => {
+    const next = subShotPatch.find((item) => item?.id && item.id === subShot.id) || subShotPatch[index] || {};
+    return {
+      ...subShot,
+      cameraLanguage: editableString(next.cameraLanguage, subShot.cameraLanguage || ""),
+      blocking: editableString(next.blocking, subShot.blocking || ""),
+      composition: editableString(next.composition, subShot.composition || ""),
+      action: editableString(next.action, subShot.action || ""),
+      assetRefs: filterAssetRefs(readPatchArray(next, "assetRefs", "asset_refs", subShot.assetRefs || []), validAssetIds)
+    };
+  });
+  const assetRefs = filterAssetRefs([
+    ...readPatchArray(patch, "assetRefs", "asset_refs", []),
+    ...audio.flatMap((row) => row.assetRefs || []),
+    ...dialogue.map((row) => row.speakerAssetId).filter(Boolean),
+    ...subShots.flatMap((subShot) => subShot.assetRefs || [])
+  ], validAssetIds);
+  const edited = {
+    ...currentPack,
+    soundDesign: editableString(patch.soundDesign, currentPack.soundDesign || ""),
+    audio,
+    dialogue,
+    subShots,
+    assetRefs,
+    manualEditedAt: updatedAt,
+    updatedAt
+  };
+  edited.seedancePrompt = "";
+  return edited;
+}
+
+function editableString(value, fallback = "") {
+  const source = Object.prototype.hasOwnProperty.call({ value }, "value") && typeof value === "string" ? value : String(fallback || "");
+  return cleanPromptSerializedTokens(source).trim();
+}
+
+function cleanPromptSerializedTokens(text = "") {
+  const source = String(text || "");
+  const fragments = parsePromptSerializedFragments(source);
+  if (!fragments.length) return source;
+  const pieces = [];
+  let cursor = 0;
+  for (const fragment of fragments) {
+    if (fragment.index < cursor) continue;
+    pieces.push(source.slice(cursor, fragment.index));
+    pieces.push(fragment.items.map((item) => `@${item.id}${item.name && item.name !== item.id ? ` ${item.name}` : ""}`).join(" "));
+    cursor = fragment.index + fragment.length;
+  }
+  pieces.push(source.slice(cursor));
+  return pieces.join("");
+}
+
+function parsePromptSerializedFragments(text = "") {
+  const source = String(text || "");
+  const fragments = [];
+  let index = 0;
+  while (index < source.length) {
+    if (source.startsWith("[[", index)) {
+      const end = source.indexOf("]]", index + 2);
+      if (end >= 0) {
+        const raw = source.slice(index, end + 2);
+        const items = parsePromptSerializedItems(source.slice(index + 2, end));
+        if (items.length) {
+          fragments.push({ index, raw, length: raw.length, items });
+          index = end + 2;
+          continue;
+        }
+      }
+    }
+    if (source[index] === "[" || source[index] === "{") {
+      const end = findPromptJsonFragmentEnd(source, index);
+      if (end > index) {
+        const raw = source.slice(index, end);
+        const items = parsePromptSerializedItems(raw);
+        if (items.length) {
+          fragments.push({ index, raw, length: raw.length, items });
+          index = end;
+          continue;
+        }
+      }
+    }
+    index += 1;
+  }
+  return fragments;
+}
+
+function parsePromptSerializedItems(value = "") {
+  const source = String(value || "");
+  let data;
+  try {
+    data = JSON.parse(source);
+  } catch {
+    const unescaped = source.replace(/\\"/g, "\"");
+    if (unescaped === source) return [];
+    try {
+      data = JSON.parse(unescaped);
+    } catch {
+      return [];
+    }
+  }
+  const rows = Array.isArray(data) ? data : [data];
+  return rows.map((item) => {
+    if (!item || typeof item !== "object") return null;
+    const id = String(item.id || item.value || "").trim();
+    if (!id) return null;
+    if (!item.name && !item.type && !item.imageUrl) return null;
+    return {
+      id,
+      name: String(item.name || id).trim()
+    };
+  }).filter(Boolean);
+}
+
+function findPromptJsonFragmentEnd(source = "", start = 0) {
+  const opener = source[start];
+  if (opener !== "[" && opener !== "{") return -1;
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "[" || char === "{") {
+      stack.push(char);
+      continue;
+    }
+    if (char !== "]" && char !== "}") continue;
+    const expected = char === "]" ? "[" : "{";
+    if (stack.pop() !== expected) return -1;
+    if (!stack.length) return index + 1;
+  }
+  return -1;
+}
+
+function readPatchArray(source = {}, camelKey, snakeKey, fallback = []) {
+  if (Object.prototype.hasOwnProperty.call(source, camelKey)) return Array.isArray(source[camelKey]) ? source[camelKey] : [];
+  if (Object.prototype.hasOwnProperty.call(source, snakeKey)) return Array.isArray(source[snakeKey]) ? source[snakeKey] : [];
+  return fallback;
+}
+
+function readPatchAssetId(source = {}, camelKey, snakeKey, fallback = "", validAssetIds = new Set()) {
+  if (Object.prototype.hasOwnProperty.call(source, camelKey)) {
+    return validAssetIds.has(source[camelKey]) ? source[camelKey] : "";
+  }
+  if (Object.prototype.hasOwnProperty.call(source, snakeKey)) {
+    return validAssetIds.has(source[snakeKey]) ? source[snakeKey] : "";
+  }
+  return validAssetIds.has(fallback) ? fallback : "";
+}
+
 async function doGeneratePromptPackages(payload = {}) {
   const [config, state] = await Promise.all([readConfig(), readState()]);
   const episode = payload.episodeId
@@ -720,10 +1065,21 @@ async function doGeneratePromptPackages(payload = {}) {
 
   const requestedIds = new Set(Array.isArray(payload.shotIds) ? payload.shotIds : []);
   const selectedShots = requestedIds.size ? episode.shots.filter((shot) => requestedIds.has(shot.id)) : episode.shots;
+  if (requestedIds.size && !selectedShots.length) {
+    throw new Error(`未找到要生成提示词的分镜：${[...requestedIds].join(", ")}`);
+  }
   const shots = selectedShots.map((shot) => ({ ...shot, durationSec: 15 }));
   const prompt = buildPromptPackagesPrompt(config, shots, state.cards, state.assetImages || [], episode);
   const result = await callLlmJson(resolveModelAdapter(config, "promptPackageLlm"), prompt, () => mockPromptPackages(config, shots, state.cards, state.assetImages || []));
   const outputs = normalizePromptPackages(result.data, shots, state.cards, state.assetImages || [], result.source, result.error || "", activeVideoProfile(config));
+  if (!outputs.length) {
+    throw new Error("模型没有返回可用的 Seedance 提示词包，请重试");
+  }
+  const outputShotIds = new Set(outputs.map((pack) => pack.shotId).filter(Boolean));
+  const missingShots = shots.filter((shot) => !outputShotIds.has(shot.id));
+  if (missingShots.length) {
+    throw new Error(`模型未返回这些分镜的提示词：${missingShots.map((shot) => shot.id).join(", ")}`);
+  }
 
   const latestState = await withStateWriteLock(async () => {
     const nextState = await readState();
@@ -732,7 +1088,7 @@ async function doGeneratePromptPackages(payload = {}) {
       throw new Error("剧集不存在");
     }
     const hydratedOutputs = hydratePromptPackageReferences(outputs, nextState.cards, nextState.assetImages || []);
-    latestEpisode.promptPackages = mergeById(latestEpisode.promptPackages || [], hydratedOutputs);
+    latestEpisode.promptPackages = mergePromptPackagesByShot(latestEpisode.promptPackages || [], hydratedOutputs);
     const updatedShotIds = new Set(hydratedOutputs.map((pack) => pack.shotId).filter(Boolean));
     latestEpisode.videos = (latestEpisode.videos || []).map((video) => updatedShotIds.has(video.shotId)
       ? {
@@ -834,6 +1190,10 @@ async function doGenerateVideos(payload = {}) {
     : (episode.promptPackages || []);
   if (!packages.length) {
     throw new Error("没有可提交的视频提示词包");
+  }
+  const stalePackages = packages.filter(isPromptPackageStale);
+  if (stalePackages.length) {
+    throw new Error(`分镜脚本已更新，请先重新生成提示词包：${stalePackages.map((pack) => pack.shotId || pack.id).join(", ")}`);
   }
 
   const adapter = resolveModelAdapter(config, "videoModel");
@@ -1171,7 +1531,7 @@ function buildSeedanceVideoPayload(config = DEFAULT_CONFIG, adapter = {}, prompt
   };
   const publicUrls = normalizeSeedanceReferenceImages(referenceImages).map((item) => item.remoteUrl || item.url).filter(Boolean);
   if (publicUrls.length) {
-    payload.image_urls = publicUrls.slice(0, Number(adapter.maxReferenceImages || 9));
+    payload.image_urls = publicUrls.slice(0, Math.min(MAX_SHOT_ASSET_REFS, Number(adapter.maxReferenceImages || MAX_SHOT_ASSET_REFS)));
   }
   return payload;
 }
@@ -1201,39 +1561,76 @@ function normalizeSeedanceReferenceImages(referenceImages = []) {
 }
 
 function buildSeedanceVideoPrompt(config, pack = {}, shot = {}, assets = [], assetImages = []) {
-  const refs = pack.assetRefs?.length ? pack.assetRefs : [...new Set((pack.subShots || []).flatMap((subShot) => subShot.assetRefs || []))];
+  const refs = savedPromptAssetRefs(pack);
   const references = assetReferencesForRefs(refs, assets, assetImages);
   const audio = pack.audio || [];
   const dialogue = pack.dialogue || [];
   const subShots = pack.subShots || [];
   const style = activeProjectStyle(config.project || {});
-  const assetBlock = references.length ? `指定参考资产：\n${references.map((asset, index) => {
-    const label = `${index + 1}. @${asset.id} ${asset.name || ""}`.trim();
-    const type = asset.type ? `，${asset.type}` : "";
-    const image = asset.imageUrl ? `，reference_image: ${asset.imageUrl}` : "";
-    return `${label}${type}${image}`;
-  }).join("\n")}` : "";
   return [
-    pack.seedancePrompt || buildSeedancePromptFromPackage(pack, shot, assets, assetImages),
+    "Seedance 2.0 视频生成提示词。请结合 image_urls 参考图生成连续视频，不要生成故事板图或首帧图。",
+    buildSeedanceReferenceBindingBlock(references),
     style.prompt ? `项目统一风格：${style.prompt}` : "",
-    assetBlock,
+    buildSeedanceSubmissionSubShotBlock(pack, shot),
     pack.soundDesign ? `分镜音效：\n${pack.soundDesign}` : "",
     audio.length ? `音效时间轴：\n${audio.map((row) => `${row.timeRange || ""} ${row.content || ""}${row.assetRefs?.length ? ` 关联资产：${row.assetRefs.map((id) => `@${id}`).join(" ")}` : ""}`.trim()).join("\n")}` : "",
     dialogue.length ? `分镜台词：\n${dialogue.map((row) => `${row.timeRange || ""} ${row.speakerAssetId ? `@${row.speakerAssetId}` : ""}${row.voice ? ` ${row.voice}` : ""}: ${row.text || ""}`.trim()).join("\n")}` : "",
-    subShots.length ? `分镜提示词：\n${subShots.map((subShot) => [
+    "要求：严格保持参考图中的角色身份、场景布局、道具外观和项目风格；不要根据未绑定的文字描述重塑角色外观；不要新增未指定角色；不要生成字幕水印。"
+  ].filter(Boolean).join("\n\n");
+}
+
+function buildSeedanceReferenceBindingBlock(references = []) {
+  const imageReferences = (references || []).filter((asset) => asset.imageUrl);
+  if (!imageReferences.length) {
+    return "";
+  }
+  return `参考图绑定（顺序与 image_urls 完全一致）：\n${imageReferences.map((asset, index) => {
+    const label = `image_urls[${index}] = @${asset.id} ${asset.name || ""}`.trim();
+    const type = asset.type ? `，${asset.type}` : "";
+    return `${index + 1}. ${label}${type}。${seedanceReferenceBindingRule(asset)}`;
+  }).join("\n")}`;
+}
+
+function seedanceReferenceBindingRule(asset = {}) {
+  const type = String(asset.type || "").toLowerCase();
+  if (type === "character") {
+    return "这是角色身份参考图；角色出镜时必须以该图作为外观主锚点，保持脸型、发型、服装、身体比例、颜色和材质，不要被动作、光效或场景风格重塑。";
+  }
+  if (type === "location") {
+    return "这是场景/空间布局参考图；保持空间结构、地标位置、家具/环境关系、材质和整体氛围，不要把场景图当作角色外观参考。";
+  }
+  if (type === "prop") {
+    return "这是道具外观参考图；保持道具形状、颜色、材质、尺寸关系和关键识别点，不要把道具图当作角色或场景参考。";
+  }
+  return "这是视觉参考图；仅用于对应 @资产 的外观一致性，不要混用到其他资产。";
+}
+
+function buildSeedanceSubmissionSubShotBlock(pack = {}, shot = {}) {
+  const subShots = Array.isArray(pack.subShots) ? pack.subShots : [];
+  if (subShots.length) {
+    return `分镜提示词（仅按以下时间段生成视频画面）：\n${subShots.map((subShot) => [
       subShot.timeRange ? `[${subShot.timeRange}]` : "",
       subShot.cameraLanguage || "",
       subShot.blocking || "",
       subShot.composition || "",
       subShot.action || "",
       subShot.assetRefs?.length ? `参考资产：${subShot.assetRefs.map((id) => `@${id}`).join(" ")}` : ""
-    ].filter(Boolean).join("；")).join("\n")}` : "",
-    "要求：严格保持项目风格、角色身份、场景布局、道具外观一致；不要新增未指定角色；不要生成字幕水印。"
-  ].filter(Boolean).join("\n\n");
+    ].filter(Boolean).join("；")).join("\n")}`;
+  }
+  if (pack.seedancePrompt) {
+    return `分镜提示词：\n${pack.seedancePrompt}`;
+  }
+  const fallback = [
+    shot.camera || "",
+    shot.action || "",
+    shot.dialogue ? `台词：${shot.dialogue}` : "",
+    shot.continuity ? `衔接：${shot.continuity}` : ""
+  ].filter(Boolean).join("；");
+  return fallback ? `分镜提示词：\n${fallback}` : "";
 }
 
 async function prepareSeedanceReferenceImages(adapter, pack = {}, assets = [], assetImages = []) {
-  const refs = pack.assetRefs?.length ? pack.assetRefs : [...new Set((pack.subShots || []).flatMap((subShot) => subShot.assetRefs || []))];
+  const refs = savedPromptAssetRefs(pack);
   const references = assetReferencesForRefs(refs, assets, assetImages)
     .filter((asset) => asset.imageUrl)
     .slice(0, MAX_SHOT_ASSET_REFS);
@@ -1828,6 +2225,123 @@ function publicReferenceImageInfo(image = {}) {
     name: image.name || "",
     mode: image.mode || (String(image.url || "").startsWith("data:image/") ? "data-url" : "url")
   };
+}
+
+function activeProjectSnapshot(projects = {}, state = {}) {
+  const project = (projects.projects || []).find((item) => item.id === projects.activeProjectId) || {};
+  return {
+    ...project,
+    state
+  };
+}
+
+function collectProjectResourceUrls(project = {}) {
+  const urls = new Set();
+  collectResourceUrls(project.coverUrl, urls);
+  collectResourceUrls(project.config?.project?.projectStyles, urls);
+  collectResourceUrls(project.config?.project?.styleReferenceImage, urls);
+  collectResourceUrls(project.state, urls);
+  return urls;
+}
+
+function collectAllProjectResourceUrls(projects = {}) {
+  const urls = new Set();
+  for (const project of projects.projects || []) {
+    for (const url of collectProjectResourceUrls(project)) {
+      urls.add(url);
+    }
+  }
+  return urls;
+}
+
+function collectResourceUrls(value, urls = new Set()) {
+  if (!value) return urls;
+  if (typeof value === "string") {
+    if (value.startsWith("/cache/")) urls.add(value);
+    return urls;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectResourceUrls(item, urls);
+    return urls;
+  }
+  if (typeof value === "object") {
+    for (const key of ["url", "imageUrl", "coverUrl", "file", "thumbnailUrl", "originalUrl"]) {
+      collectResourceUrls(value[key], urls);
+    }
+    for (const item of Object.values(value)) {
+      if (item && typeof item === "object") collectResourceUrls(item, urls);
+    }
+  }
+  return urls;
+}
+
+async function cleanupUnreferencedCacheFiles(candidateUrls = new Set(), projects = {}) {
+  const remainingUrls = collectAllProjectResourceUrls(projects);
+  const removed = [];
+  for (const url of candidateUrls || []) {
+    if (!String(url || "").startsWith("/cache/") || remainingUrls.has(url)) {
+      continue;
+    }
+    const filePath = localCachePathFromUrl(url);
+    if (!filePath || !isDeletableCachePath(filePath)) {
+      continue;
+    }
+    try {
+      await fs.unlink(filePath);
+      removed.push(url);
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        console.warn(`Unable to delete cache file ${url}: ${error.message}`);
+      }
+    }
+  }
+  return removed;
+}
+
+function isDeletableCachePath(filePath = "") {
+  const fullPath = path.resolve(filePath);
+  const imageRoot = path.resolve(IMAGE_DIR);
+  const videoRoot = path.resolve(VIDEO_DIR);
+  return fullPath.startsWith(`${imageRoot}${path.sep}`) || fullPath.startsWith(`${videoRoot}${path.sep}`);
+}
+
+function stripAssetFromPromptPackage(pack = {}, assetId = "") {
+  let changed = false;
+  const removeRefs = (refs) => {
+    const input = Array.isArray(refs) ? refs : [];
+    const output = input.filter((id) => id !== assetId);
+    if (output.length !== input.length) changed = true;
+    return output;
+  };
+  const next = {
+    ...pack,
+    assetRefs: removeRefs(pack.assetRefs),
+    assetReferences: (pack.assetReferences || []).filter((asset) => {
+      const keep = asset.id !== assetId;
+      if (!keep) changed = true;
+      return keep;
+    }),
+    audio: (pack.audio || []).map((row) => ({
+      ...row,
+      assetRefs: removeRefs(row.assetRefs)
+    })),
+    dialogue: (pack.dialogue || []).map((row) => {
+      const speakerAssetId = row.speakerAssetId === assetId ? "" : row.speakerAssetId;
+      if (speakerAssetId !== row.speakerAssetId) changed = true;
+      return { ...row, speakerAssetId };
+    }),
+    subShots: (pack.subShots || []).map((subShot) => ({
+      ...subShot,
+      assetRefs: removeRefs(subShot.assetRefs)
+    }))
+  };
+  return { pack: next, changed };
+}
+
+function videoUsesAsset(video = {}, assetId = "") {
+  return (video.referenceImages || []).some((image) => image.id === assetId)
+    || (video.requestPayload?.image_urls || []).some((url) => String(url || "").includes(assetId))
+    || String(video.prompt || "").includes(assetId);
 }
 
 function projectAttributes(project = {}) {
@@ -2653,11 +3167,13 @@ function normalizePromptPackages(data, shots, cards, assetImages, source, adapte
   const assets = flattenCards(cards);
   const validAssetIds = new Set(assets.map((asset) => asset.id));
   return packages.map((item, index) => {
-    const shot = shots.find((candidate) => candidate.id === item.shotId) || shots[index] || {};
+    const matchedShot = shots.find((candidate) => candidate.id === item.shotId);
+    const shot = matchedShot || shots[index] || {};
+    if (!shot.id) return null;
     const subShots = Array.isArray(item.subShots) ? item.subShots : Array.isArray(item.sub_shots) ? item.sub_shots : [];
     const normalized = {
-      id: stringOr(item.id, `PKG-${shot.id || `SH${String(index + 1).padStart(2, "0")}`}`),
-      shotId: stringOr(item.shotId, shot.id || `SH${String(index + 1).padStart(2, "0")}`),
+      id: `PKG-${shot.id}`,
+      shotId: shot.id,
       targetProfile: stringOr(item.targetProfile, videoProfile?.id || DEFAULT_VIDEO_PROFILE_ID),
       videoProfile: {
         id: videoProfile?.id || DEFAULT_VIDEO_PROFILE_ID,
@@ -2692,7 +3208,7 @@ function normalizePromptPackages(data, shots, cards, assetImages, source, adapte
       normalized.seedancePrompt = buildSeedancePromptFromPackage(normalized, shot, assets, assetImages);
     }
     return normalized;
-  });
+  }).filter(Boolean);
 }
 
 function normalizeAssetType(value) {
@@ -2844,15 +3360,23 @@ function assetReferencesForRefs(refs, assets, assetImages) {
 function hydratePromptPackageReferences(packages, cards, assetImages) {
   const assets = flattenCards(cards);
   return (packages || []).map((pack) => {
-    const refs = pack.assetRefs?.length
-      ? pack.assetRefs
-      : [...new Set((pack.subShots || []).flatMap((subShot) => subShot.assetRefs || []))];
+    const refs = savedPromptAssetRefs(pack);
     return {
       ...pack,
       assetRefs: refs,
     assetReferences: assetReferencesForRefs(refs, assets, assetImages)
     };
   });
+}
+
+function savedPromptAssetRefs(pack = {}) {
+  if (Array.isArray(pack.assetRefs)) return filterUniqueStrings(pack.assetRefs);
+  if (Array.isArray(pack.asset_refs)) return filterUniqueStrings(pack.asset_refs);
+  return filterUniqueStrings((pack.subShots || []).flatMap((subShot) => subShot.assetRefs || subShot.asset_refs || []));
+}
+
+function filterUniqueStrings(values = []) {
+  return [...new Set((Array.isArray(values) ? values : []).map((value) => String(value || "").trim()).filter(Boolean))];
 }
 
 function activeVideoProfile(config = {}) {
@@ -2879,7 +3403,7 @@ function buildSeedancePromptFromParts(shot, assetRefs, assets, assetImages) {
 }
 
 function buildSeedancePromptFromPackage(pack, shot, assets, assetImages) {
-  const refs = pack.assetRefs?.length ? pack.assetRefs : [...new Set((pack.subShots || []).flatMap((subShot) => subShot.assetRefs || []))];
+  const refs = savedPromptAssetRefs(pack);
   return [
     buildSeedancePromptFromParts(shot, refs, assets, assetImages),
     `Sound: ${pack.soundDesign || ""}`,
@@ -3318,6 +3842,61 @@ async function openProject(projectId) {
   };
 }
 
+async function deleteProject(projectId) {
+  if (!projectId) {
+    throw new Error("Missing project id");
+  }
+  const projects = await readProjects();
+  const project = projects.projects.find((item) => item.id === projectId);
+  if (!project) {
+    throw new Error("Project not found");
+  }
+  const wasActiveProject = projects.activeProjectId === projectId;
+  const deletedResources = collectProjectResourceUrls(project);
+  projects.projects = projects.projects.filter((item) => item.id !== projectId);
+  const nextProject = wasActiveProject
+    ? sortProjects(projects.projects)[0] || null
+    : projects.projects.find((item) => item.id === projects.activeProjectId) || sortProjects(projects.projects)[0] || null;
+  projects.projects = sortProjects(projects.projects);
+  projects.activeProjectId = nextProject?.id || null;
+  const removedFiles = await cleanupUnreferencedCacheFiles(deletedResources, projects);
+
+  if (nextProject) {
+    const platformConfig = await readConfig();
+    const config = configForProject(platformConfig, nextProject.config || DEFAULT_CONFIG);
+    const nextState = normalizeState(nextProject.state || freshState());
+    await writeConfig(config);
+    await writeState(nextState);
+    nextProject.config = projectConfigForStorage(config);
+    nextProject.coverUrl = inferProjectCover(nextState);
+    await writeProjects(projects);
+    return {
+      ok: true,
+      deletedProjectId: projectId,
+      removedFiles,
+      project: projectForClient(nextProject),
+      projects: projectListForClient(projects),
+      activeProjectId: nextProject.id,
+      config: sanitizeConfig(config),
+      state: nextState
+    };
+  }
+
+  const config = await readConfig();
+  const nextState = freshState();
+  await writeState(nextState);
+  await writeProjects(projects);
+  return {
+    ok: true,
+    deletedProjectId: projectId,
+    removedFiles,
+    projects: [],
+    activeProjectId: null,
+    config: sanitizeConfig(config),
+    state: nextState
+  };
+}
+
 async function updateStoryScript(payload = {}) {
   const [config, state] = await Promise.all([readConfig(), readState()]);
   const title = stringOr(payload.title, config.project.title || "未命名项目");
@@ -3418,6 +3997,38 @@ async function openEpisode(episodeId) {
   return { ok: true, state, episode };
 }
 
+async function deleteEpisode(episodeId) {
+  if (!episodeId) {
+    throw new Error("Missing episode id");
+  }
+  const state = await readState();
+  const episode = (state.episodes || []).find((item) => item.id === episodeId);
+  if (!episode) {
+    throw new Error("Episode not found");
+  }
+  const projects = await readProjects();
+  const beforeResources = collectProjectResourceUrls(activeProjectSnapshot(projects, state));
+  state.episodes = (state.episodes || []).filter((item) => item.id !== episodeId);
+  if (state.activeEpisodeId === episodeId) {
+    state.activeEpisodeId = state.episodes[0]?.id || null;
+  }
+  touchState(state);
+  addEvent(state, "episode.deleted", `${episode.title || episode.id} deleted`, "local");
+  await writeState(state);
+  await syncActiveProject({ state });
+  const nextProjects = await readProjects();
+  const removedFiles = await cleanupUnreferencedCacheFiles(beforeResources, nextProjects);
+  const latestProjects = await readProjects();
+  return {
+    ok: true,
+    deletedEpisodeId: episodeId,
+    removedFiles,
+    state,
+    projects: projectListForClient(latestProjects),
+    activeProjectId: latestProjects.activeProjectId
+  };
+}
+
 async function updateEpisodeScript(payload = {}) {
   const [config, state] = await Promise.all([readConfig(), readState()]);
   const episodeId = payload.episodeId || state.activeEpisodeId;
@@ -3511,6 +4122,62 @@ async function saveManualAsset(payload = {}) {
   await writeState(state);
   await syncActiveProject({ state });
   return { ok: true, state, asset: card };
+}
+
+async function deleteAsset(assetId) {
+  if (!assetId) {
+    throw new Error("Missing asset id");
+  }
+  const state = await readState();
+  const asset = findAssetById(state.cards, assetId);
+  if (!asset) {
+    throw new Error("Asset not found");
+  }
+  const projects = await readProjects();
+  const beforeResources = collectProjectResourceUrls(activeProjectSnapshot(projects, state));
+  const type = normalizeAssetType(asset.type);
+  const listKey = assetListKey(type);
+  state.cards[listKey] = (state.cards[listKey] || []).filter((item) => item.id !== assetId);
+  state.assetImages = (state.assetImages || []).filter((image) => image.assetId !== assetId);
+  if (state.assetImageHistory) {
+    delete state.assetImageHistory[assetId];
+  }
+  for (const episode of state.episodes || []) {
+    let touched = false;
+    episode.shots = (episode.shots || []).map((shot) => {
+      const refs = (shot.assetRefs || []).filter((id) => id !== assetId);
+      if (refs.length !== (shot.assetRefs || []).length) touched = true;
+      return { ...shot, assetRefs: refs };
+    });
+    episode.promptPackages = (episode.promptPackages || []).map((pack) => {
+      const filtered = stripAssetFromPromptPackage(pack, assetId);
+      if (filtered.changed) touched = true;
+      return filtered.pack;
+    });
+    episode.videos = (episode.videos || []).map((video) => {
+      const usesAsset = videoUsesAsset(video, assetId);
+      if (usesAsset) touched = true;
+      return usesAsset
+        ? { ...video, stale: true, staleReason: "asset-deleted", staleAt: new Date().toISOString() }
+        : video;
+    });
+    if (touched) touchEpisode(episode);
+  }
+  touchState(state);
+  addEvent(state, "asset.deleted", `${asset.name || asset.id} deleted`, "local");
+  await writeState(state);
+  await syncActiveProject({ state });
+  const nextProjects = await readProjects();
+  const removedFiles = await cleanupUnreferencedCacheFiles(beforeResources, nextProjects);
+  const latestProjects = await readProjects();
+  return {
+    ok: true,
+    deletedAssetId: assetId,
+    removedFiles,
+    state,
+    projects: projectListForClient(latestProjects),
+    activeProjectId: latestProjects.activeProjectId
+  };
 }
 
 async function saveDataUrlImage(dataUrl, name = "asset") {
@@ -3870,8 +4537,10 @@ function normalizeVideoProfiles(current = {}, next = {}) {
         type: stringOr(profile.type, "video"),
         promptSchema: stringOr(profile.promptSchema, "seedance-prompt-package-v1"),
         requestBuilder: stringOr(profile.requestBuilder, id === DEFAULT_VIDEO_PROFILE_ID ? "seedance" : "custom"),
-        maxReferenceImages: Number(profile.maxReferenceImages || MAX_SHOT_ASSET_REFS),
-        description: stringOr(profile.description, "")
+        maxReferenceImages: profile.id === DEFAULT_VIDEO_PROFILE_ID
+          ? Math.max(MAX_SHOT_ASSET_REFS, Number(profile.maxReferenceImages || 0))
+          : Number(profile.maxReferenceImages || MAX_SHOT_ASSET_REFS),
+        description: id === DEFAULT_VIDEO_PROFILE_ID ? `15s 分镜提示词 + 最多 ${MAX_SHOT_ASSET_REFS} 张资产参考图。` : stringOr(profile.description, "")
       });
     }
   };
@@ -4235,14 +4904,17 @@ function normalizeJobs(jobs = []) {
         return job;
       }
       const updatedAt = Date.parse(job.updatedAt || job.createdAt || "");
-      if (!Number.isFinite(updatedAt) || now - updatedAt <= JOB_STALE_MS) {
+      const staleMs = job.type === "prompt-package" ? PROMPT_JOB_STALE_MS : JOB_STALE_MS;
+      if (!Number.isFinite(updatedAt) || now - updatedAt <= staleMs) {
         return job;
       }
       return {
         ...job,
         status: "failed",
         label: job.label || "任务已超时",
-        error: job.error || "任务超过 2 小时未返回，可能是服务已重启或上游请求中断。",
+        error: job.error || (job.type === "prompt-package"
+          ? "Seedance 提示词生成超过 20 分钟未返回，可能是上游模型超时或服务中断，请重新生成。"
+          : "任务超过 2 小时未返回，可能是服务已重启或上游请求中断。"),
         updatedAt: new Date().toISOString()
       };
     })
@@ -4392,6 +5064,12 @@ function mergeById(previous, next) {
     map.set(item.id, item);
   }
   return [...map.values()].sort((a, b) => String(a.id).localeCompare(String(b.id), "en"));
+}
+
+function mergePromptPackagesByShot(previous, next) {
+  const nextShotIds = new Set((next || []).map((item) => item.shotId).filter(Boolean));
+  const kept = (previous || []).filter((item) => !nextShotIds.has(item.shotId));
+  return [...kept, ...(next || [])].sort((a, b) => String(a.shotId || a.id).localeCompare(String(b.shotId || b.id), "en"));
 }
 
 async function withStateWriteLock(task) {

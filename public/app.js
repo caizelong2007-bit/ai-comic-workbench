@@ -23,6 +23,7 @@ const viewMeta = {
 
 const defaultStyleImage = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 160'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%23f4edff'/%3E%3Cstop offset='1' stop-color='%23dff6f2'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='120' height='160' rx='12' fill='url(%23g)'/%3E%3Ccircle cx='36' cy='42' r='18' fill='%238f64df' opacity='.28'/%3E%3Cpath d='M24 118 54 78l18 24 12-15 20 31z' fill='%230f8b8d' opacity='.35'/%3E%3C/svg%3E";
 const maxUploadImageBytes = 15 * 1024 * 1024;
+const maxPromptReferenceAssets = 6;
 
 const els = {};
 let current = {
@@ -45,6 +46,9 @@ let serverJobPollTimer = null;
 let serverJobPollInFlight = false;
 let videoTaskPollTimer = null;
 let videoTaskPollInFlight = false;
+let pendingDelete = null;
+let promptEditor = null;
+let shotEditor = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -75,6 +79,12 @@ function bindElements() {
     "episodeCreateNote",
     "episodeCreateHint",
     "createEpisodeSubmitBtn",
+    "confirmDeleteModal",
+    "closeConfirmDeleteBtn",
+    "cancelConfirmDeleteBtn",
+    "confirmDeleteBtn",
+    "confirmDeleteTitle",
+    "confirmDeleteBody",
     "modelCenterModal",
     "closeModelCenterBtn",
     "styleModal",
@@ -102,6 +112,13 @@ function bindElements() {
     "promptDetailCopyBtn",
     "promptDetailExportBtn",
     "promptDetailUseBtn",
+    "shotEditorModal",
+    "shotEditorForm",
+    "closeShotEditorBtn",
+    "cancelShotEditorBtn",
+    "saveShotEditorBtn",
+    "shotEditorTitle",
+    "shotEditorMeta",
     "eventsModal",
     "closeEventsModalBtn",
     "eventsRefreshBtn",
@@ -180,6 +197,12 @@ function bindEvents() {
   });
   els.createEpisodeForm.addEventListener("submit", createEpisodeFromForm);
   els.createEpisodeForm.addEventListener("change", updateCreateEpisodeMode);
+  els.closeConfirmDeleteBtn.addEventListener("click", closeConfirmDeleteModal);
+  els.cancelConfirmDeleteBtn.addEventListener("click", closeConfirmDeleteModal);
+  els.confirmDeleteBtn.addEventListener("click", confirmPendingDelete);
+  els.confirmDeleteModal.addEventListener("click", (event) => {
+    if (event.target === els.confirmDeleteModal) closeConfirmDeleteModal();
+  });
   els.closeModelCenterBtn.addEventListener("click", closeModelCenterModal);
   els.modelCenterModal.addEventListener("click", (event) => {
     if (event.target === els.modelCenterModal) closeModelCenterModal();
@@ -207,11 +230,28 @@ function bindEvents() {
   els.promptDetailModal.addEventListener("click", (event) => {
     if (event.target === els.promptDetailModal) closePromptDetailModal();
     const subshotTab = event.target.closest("[data-subshot-tab]");
-    if (subshotTab) setPromptSubshotTab(subshotTab.dataset.subshotTab);
+    if (subshotTab) {
+      setPromptSubshotTab(subshotTab.dataset.subshotTab);
+      return;
+    }
+    const previewToggle = event.target.closest("[data-toggle-request-preview]");
+    if (previewToggle) {
+      togglePromptRequestPreview();
+      return;
+    }
   });
+  els.promptDetailBody.addEventListener("input", handlePromptEditorInput);
+  els.promptDetailBody.addEventListener("focusin", handlePromptEditorFocusIn);
+  els.promptDetailBody.addEventListener("focusout", handlePromptEditorFocusOut);
   els.promptDetailCopyBtn.addEventListener("click", () => copyPromptPackage(els.promptDetailCopyBtn.dataset.copyPrompt));
   els.promptDetailExportBtn.addEventListener("click", () => exportPromptPackage(els.promptDetailExportBtn.dataset.exportPrompt));
-  els.promptDetailUseBtn.addEventListener("click", closePromptDetailModal);
+  els.promptDetailUseBtn.addEventListener("click", savePromptPackageEdits);
+  els.closeShotEditorBtn.addEventListener("click", closeShotEditorModal);
+  els.cancelShotEditorBtn.addEventListener("click", closeShotEditorModal);
+  els.shotEditorModal.addEventListener("click", (event) => {
+    if (event.target === els.shotEditorModal) closeShotEditorModal();
+  });
+  els.shotEditorForm.addEventListener("submit", saveShotEditorEdits);
   els.assetForm.addEventListener("submit", saveManualAsset);
   els.assetImageFileInput.addEventListener("change", loadAssetImageFile);
   els.saveStoryBtn.addEventListener("click", saveStoryScript);
@@ -257,11 +297,22 @@ function bindEvents() {
   });
 
   els.episodeList.addEventListener("click", (event) => {
+    const deleteButton = event.target.closest("[data-delete-episode]");
+    if (deleteButton) {
+      event.stopPropagation();
+      openDeleteEpisodeConfirm(deleteButton.dataset.deleteEpisode);
+      return;
+    }
     const episodeButton = event.target.closest("[data-open-episode]");
     if (episodeButton) openEpisode(episodeButton.dataset.openEpisode);
   });
 
   els.shotsOutput.addEventListener("click", (event) => {
+    const editShotButton = event.target.closest("[data-edit-shot]");
+    if (editShotButton) {
+      openShotEditorModal(editShotButton.dataset.editShot);
+      return;
+    }
     const viewPromptButton = event.target.closest("[data-view-prompt]");
     if (viewPromptButton) {
       openPromptDetailModal(viewPromptButton.dataset.viewPrompt);
@@ -310,6 +361,12 @@ function bindEvents() {
     if (assetButton) {
       event.stopPropagation();
       runAssetImage(assetButton.dataset.generateAsset);
+      return;
+    }
+    const deleteButton = event.target.closest("[data-delete-asset]");
+    if (deleteButton) {
+      event.stopPropagation();
+      openDeleteAssetConfirm(deleteButton.dataset.deleteAsset);
       return;
     }
     const editButton = event.target.closest("[data-edit-asset]");
@@ -369,6 +426,12 @@ function bindEvents() {
       openProject(settingsButton.dataset.projectSettings, { mode: "settings", tab: "project-script-block" });
       return;
     }
+    const deleteButton = event.target.closest("[data-delete-project]");
+    if (deleteButton) {
+      event.stopPropagation();
+      openDeleteProjectConfirm(deleteButton.dataset.deleteProject);
+      return;
+    }
     const projectCard = event.target.closest("[data-open-project]");
     if (projectCard) openProject(projectCard.dataset.openProject, { mode: "episodes" });
   });
@@ -417,7 +480,13 @@ function setShotAssetTab(shotId, type = "all") {
 }
 
 async function parseResponse(response) {
-  const data = await response.json().catch(() => ({}));
+  const raw = await response.text();
+  let data = {};
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error(`接口返回非 JSON 内容：HTTP ${response.status}`);
+  }
   if (!response.ok || data.ok === false) {
     throw new Error(data.error || `HTTP ${response.status}`);
   }
@@ -479,7 +548,9 @@ function syncServerJobs(serverJobs = [], options = {}) {
           seenServerJobErrors.add(errorKey);
           toast(`${job.label || "生成失败"}：${job.error}`);
         }
-        clearJobSoon(key);
+        if (!shouldPersistJobError(key)) {
+          clearJobSoon(key);
+        }
       }
       continue;
     }
@@ -574,6 +645,12 @@ async function pollVideoTasks() {
 function clientJobKeyFromServer(job = {}) {
   if (String(job.scopeId || "").startsWith("shot-assets:")) {
     return packageAssetsJobKey(String(job.scopeId).replace(/^shot-assets:/, ""));
+  }
+  if (job.type === "prompt-package") {
+    const scopeId = String(job.scopeId || "");
+    const parts = scopeId.split(":").filter(Boolean);
+    if (parts.length >= 2) return promptJobKeyForEpisode(parts[0], parts.slice(1).join(":"));
+    return `prompt-package:legacy:${scopeId || "global"}`;
   }
   if (job.type === "video-clip") {
     return `video-clip:${job.scopeId || "video-clips"}`;
@@ -695,6 +772,116 @@ async function openEpisode(episodeId) {
     setActiveView("episode-script");
     toast("剧集已切换");
   }, "切换剧集失败");
+}
+
+function openDeleteProjectConfirm(projectId) {
+  const project = (current.projects || []).find((item) => item.id === projectId);
+  if (!project) {
+    toast("项目不存在或已删除");
+    return;
+  }
+  pendingDelete = { type: "project", id: projectId };
+  els.confirmDeleteTitle.textContent = "删除项目";
+  els.confirmDeleteBtn.textContent = "删除项目";
+  els.confirmDeleteBody.innerHTML = `
+    <p>删除后将移除该项目的剧本、资产、分集、提示词和视频任务记录，并清理不再被引用的本地缓存文件。</p>
+    <dl class="delete-summary">
+      <div><dt>项目</dt><dd>${escapeHtml(displayProjectTitle(project))}</dd></div>
+      <div><dt>分集</dt><dd>${escapeHtml(project.stats?.episodes || 0)} 集</dd></div>
+      <div><dt>资产</dt><dd>${escapeHtml(project.stats?.assets || 0)} 个</dd></div>
+      <div><dt>分镜</dt><dd>${escapeHtml(project.stats?.shots || 0)} 个</dd></div>
+      <div><dt>提示词包</dt><dd>${escapeHtml(project.stats?.promptPackages || 0)} 个</dd></div>
+      <div><dt>更新时间</dt><dd>${escapeHtml(formatTime(project.updatedAt || project.createdAt))}</dd></div>
+    </dl>
+  `;
+  els.confirmDeleteModal.classList.remove("is-hidden");
+}
+
+function openDeleteEpisodeConfirm(episodeId) {
+  const episode = (current.state?.episodes || []).find((item) => item.id === episodeId);
+  if (!episode) {
+    toast("剧集不存在或已删除");
+    return;
+  }
+  pendingDelete = { type: "episode", id: episodeId };
+  els.confirmDeleteTitle.textContent = "删除剧集";
+  els.confirmDeleteBtn.textContent = "删除剧集";
+  els.confirmDeleteBody.innerHTML = `
+    <p>删除后将移除该剧集的剧本、分镜、提示词包和视频任务记录。项目资产库不会被删除。</p>
+    <dl class="delete-summary">
+      <div><dt>剧集</dt><dd>${escapeHtml(episode.title || episode.id)}</dd></div>
+      <div><dt>分镜</dt><dd>${escapeHtml((episode.shots || []).length)} 个</dd></div>
+      <div><dt>提示词包</dt><dd>${escapeHtml((episode.promptPackages || []).length)} 个</dd></div>
+      <div><dt>视频任务</dt><dd>${escapeHtml((episode.videos || []).length)} 个</dd></div>
+      <div><dt>更新时间</dt><dd>${escapeHtml(formatTime(episode.updatedAt || episode.createdAt))}</dd></div>
+    </dl>
+  `;
+  els.confirmDeleteModal.classList.remove("is-hidden");
+}
+
+function openDeleteAssetConfirm(assetId) {
+  const asset = findClientAsset(assetId);
+  if (!asset) {
+    toast("资产不存在或已删除");
+    return;
+  }
+  const usage = assetUsageSummary(assetId);
+  pendingDelete = { type: "asset", id: assetId };
+  els.confirmDeleteTitle.textContent = "删除资产";
+  els.confirmDeleteBtn.textContent = "删除资产";
+  els.confirmDeleteBody.innerHTML = `
+    <p>删除后将移除资产卡、当前图和历史图，并从分镜/提示词包中移除引用；已生成且引用该资产的视频会标记为需要重新生成。</p>
+    <dl class="delete-summary">
+      <div><dt>资产</dt><dd>${escapeHtml(asset.name || asset.id)}</dd></div>
+      <div><dt>类型</dt><dd>${escapeHtml(assetTypeLabel(asset.type))}</dd></div>
+      <div><dt>历史图</dt><dd>${escapeHtml(usage.historyCount)} 张</dd></div>
+      <div><dt>引用分镜</dt><dd>${escapeHtml(usage.shots)} 个</dd></div>
+      <div><dt>引用提示词</dt><dd>${escapeHtml(usage.packages)} 个</dd></div>
+      <div><dt>引用视频</dt><dd>${escapeHtml(usage.videos)} 个</dd></div>
+    </dl>
+  `;
+  els.confirmDeleteModal.classList.remove("is-hidden");
+}
+
+function closeConfirmDeleteModal() {
+  pendingDelete = null;
+  els.confirmDeleteModal.classList.add("is-hidden");
+  els.confirmDeleteBody.innerHTML = "";
+}
+
+async function confirmPendingDelete() {
+  if (!pendingDelete) return;
+  const target = pendingDelete;
+  const labels = { project: "项目", episode: "剧集", asset: "资产" };
+  await withBusy(`delete:${target.type}:${target.id}`, async () => {
+    const data = await api.post(deleteEndpoint(target.type), deletePayload(target));
+    applyServerData(data);
+    closeConfirmDeleteModal();
+    render();
+    if (target.type === "project") {
+      showProjectHome();
+    } else if (target.type === "episode") {
+      setStudioMode("episodes");
+      setActiveView("episode-script");
+    } else if (target.type === "asset") {
+      setAssetTab(current.activeAssetTab);
+    }
+    toast(`${labels[target.type] || "内容"}已删除${data.removedFiles?.length ? `，清理缓存 ${data.removedFiles.length} 个` : ""}`);
+  }, `删除${labels[target.type] || "内容"}失败`);
+}
+
+function deleteEndpoint(type) {
+  return {
+    project: "/api/projects/delete",
+    episode: "/api/episodes/delete",
+    asset: "/api/assets/delete"
+  }[type];
+}
+
+function deletePayload(target) {
+  if (target.type === "project") return { projectId: target.id };
+  if (target.type === "episode") return { episodeId: target.id };
+  return { assetId: target.id };
 }
 
 function showProjectHome() {
@@ -861,17 +1048,85 @@ function openPromptDetailModal(packageId) {
     return;
   }
   const shot = (getActiveEpisode()?.shots || []).find((item) => item.id === pack.shotId) || {};
+  promptEditor = createPromptEditorState(pack, shot);
   els.promptDetailBody.innerHTML = renderPromptDetail(pack, shot);
+  attachPromptMentionEditors();
   els.promptDetailCopyBtn.dataset.copyPrompt = pack.id;
   els.promptDetailExportBtn.dataset.exportPrompt = pack.id;
+  els.promptDetailUseBtn.textContent = "保存修改";
   els.promptDetailModal.classList.remove("is-hidden");
 }
 
 function closePromptDetailModal() {
+  detachPromptMentionEditors();
   els.promptDetailModal.classList.add("is-hidden");
   els.promptDetailBody.innerHTML = "";
   els.promptDetailCopyBtn.dataset.copyPrompt = "";
   els.promptDetailExportBtn.dataset.exportPrompt = "";
+  promptEditor = null;
+}
+
+function openShotEditorModal(shotId) {
+  const episode = getActiveEpisode();
+  const shot = (episode?.shots || []).find((item) => item.id === shotId);
+  if (!shot) {
+    toast("没有找到分镜脚本");
+    return;
+  }
+  shotEditor = {
+    episodeId: episode.id,
+    shotId: shot.id
+  };
+  const form = els.shotEditorForm;
+  form.elements.sceneId.value = shot.sceneId || "";
+  form.elements.shotType.value = shot.shotType || "";
+  form.elements.camera.value = shot.camera || "";
+  form.elements.action.value = shot.action || "";
+  form.elements.dialogue.value = shot.dialogue || "";
+  form.elements.assetNotes.value = shot.assetNotes || "";
+  form.elements.visualNotes.value = shot.visualNotes || "";
+  form.elements.continuity.value = shot.continuity || "";
+  els.shotEditorTitle.textContent = `编辑分镜脚本 ${shot.id}`;
+  els.shotEditorMeta.textContent = `${shot.durationSec || 15}s / ${shot.sceneId || "未指定场景"}`;
+  els.shotEditorModal.classList.remove("is-hidden");
+  form.elements.camera.focus();
+}
+
+function closeShotEditorModal() {
+  els.shotEditorModal.classList.add("is-hidden");
+  els.shotEditorForm.reset();
+  shotEditor = null;
+}
+
+async function saveShotEditorEdits(event) {
+  event.preventDefault();
+  if (!shotEditor?.shotId) return;
+  const formData = new FormData(els.shotEditorForm);
+  const shot = {
+    sceneId: String(formData.get("sceneId") || "").trim(),
+    shotType: String(formData.get("shotType") || "").trim(),
+    camera: String(formData.get("camera") || "").trim(),
+    action: String(formData.get("action") || "").trim(),
+    dialogue: String(formData.get("dialogue") || "").trim(),
+    assetNotes: String(formData.get("assetNotes") || "").trim(),
+    visualNotes: String(formData.get("visualNotes") || "").trim(),
+    continuity: String(formData.get("continuity") || "").trim()
+  };
+  if (!shot.camera || !shot.action) {
+    toast("请至少填写运镜和画面动作");
+    return;
+  }
+  await withBusy(`shot:save:${shotEditor.shotId}`, async () => {
+    const data = await api.post("/api/shots/save", {
+      episodeId: shotEditor.episodeId,
+      shotId: shotEditor.shotId,
+      shot
+    });
+    applyServerData(data);
+    closeShotEditorModal();
+    render();
+    toast("分镜脚本已保存，相关提示词和视频需要重新确认");
+  }, "保存分镜失败");
 }
 
 function openEventsModal() {
@@ -890,6 +1145,286 @@ function setPromptSubshotTab(subshotId) {
   els.promptDetailBody.querySelectorAll("[data-subshot-panel]").forEach((panel) => {
     panel.classList.toggle("is-active", panel.dataset.subshotPanel === subshotId);
   });
+}
+
+function createPromptEditorState(pack = {}, shot = {}) {
+  const referenceAssets = uniqueAssets([
+    ...(pack.assetReferences || []),
+    ...clientAssetCatalog().filter((asset) => (pack.assetRefs || []).includes(asset.id))
+  ]);
+  return {
+    packageId: pack.id,
+    episodeId: getActiveEpisode()?.id || "",
+    shotId: pack.shotId || shot.id || "",
+    tagifyFields: [],
+    attachedFields: [],
+    manualEdited: Boolean(pack.manualEditedAt),
+    showRequestPreview: false,
+    assetCatalog: clientAssetCatalog(),
+    selectedRefs: new Set(referenceAssets.map((asset) => asset.id))
+  };
+}
+
+function handlePromptEditorInput(event) {
+  const field = event.target.closest("[data-prompt-editor]");
+  if (!field || !promptEditor) return;
+  updatePromptReferenceCounter();
+}
+
+function handlePromptEditorFocusIn(event) {
+  const field = event.target.closest("[data-prompt-editor]");
+  if (!field || !promptEditor) return;
+  const row = field.closest(".prompt-edit-row");
+  if (row) row.classList.add("is-editing");
+}
+
+function handlePromptEditorFocusOut(event) {
+  const field = event.target.closest("[data-prompt-editor]");
+  if (!field || !promptEditor) return;
+  window.setTimeout(() => {
+    const row = field.closest(".prompt-edit-row");
+    if (row && document.activeElement !== field) row.classList.remove("is-editing");
+    updatePromptMentionPreview(field);
+  }, 0);
+}
+
+function promptFieldRefs(field) {
+  return uniqueAssetIds(parsePromptMentions(field?.value || "").map((item) => item.id));
+}
+
+function promptFieldText(field) {
+  if (!field) return "";
+  return decodePromptMentionText(field.value || "").trim();
+}
+
+function attachPromptMentionEditors() {
+  if (!promptEditor) return;
+  const fields = [...els.promptDetailBody.querySelectorAll("[data-prompt-editor]")];
+  promptEditor.attachedFields = fields;
+  fields.forEach(updatePromptMentionPreview);
+  if (typeof Tribute === "undefined") {
+    toast("提示词 @ 选择器库未加载");
+    return;
+  }
+  promptEditor.tribute = new Tribute({
+    trigger: "@",
+    values: promptMentionValues(),
+    lookup: (item) => item.lookup,
+    fillAttr: "insertText",
+    requireLeadingSpace: false,
+    allowSpaces: true,
+    replaceTextSuffix: "",
+    menuItemTemplate: (item) => renderPromptMentionMenuItem(item.original),
+    selectTemplate: (item) => item?.original?.insertText || ""
+  });
+  promptEditor.tribute.attach(fields);
+  fields.forEach((field) => {
+    field.addEventListener("tribute-replaced", () => {
+      updatePromptMentionPreview(field);
+      updatePromptReferenceCounter();
+    });
+  });
+}
+
+function detachPromptMentionEditors() {
+  if (promptEditor?.tribute && promptEditor.attachedFields?.length) {
+    promptEditor.tribute.detach(promptEditor.attachedFields);
+  }
+}
+
+function promptMentionValues() {
+  return (promptEditor?.assetCatalog || []).map((asset) => {
+    const label = asset.name && asset.name !== asset.id ? `${asset.name} ${asset.id}` : asset.name || asset.id;
+    return {
+      id: asset.id,
+      name: asset.name || asset.id,
+      type: asset.type,
+      imageUrl: asset.imageUrl || "",
+      lookup: uniqueAssetIds([asset.name, asset.id, ...(asset.aliases || [])]).join(" "),
+      insertText: promptMentionDisplay(asset),
+      label
+    };
+  });
+}
+
+function renderPromptMentionMenuItem(asset = {}) {
+  return `
+    <span class="prompt-mention-option">
+      ${asset.imageUrl ? `<img src="${escapeAttr(asset.imageUrl)}" alt="${escapeAttr(asset.name || asset.id)}">` : `<i>${escapeHtml((asset.name || asset.id || "?").slice(0, 1))}</i>`}
+      <strong>${escapeHtml(asset.name || asset.id)}</strong>
+      <small>${escapeHtml(assetTypeLabel(asset.type))}</small>
+    </span>
+  `;
+}
+
+function promptMentionMarkup(asset = {}) {
+  return promptMentionDisplay(asset);
+}
+
+function promptMentionDisplay(asset = {}) {
+  return `@${asset.name || asset.id}`;
+}
+
+function parsePromptMentions(text = "", assets = promptEditor?.assetCatalog || clientAssetCatalog()) {
+  const source = String(text || "");
+  const matches = [];
+  for (const asset of assets) {
+    for (const term of promptMentionParseTerms(asset, assets)) {
+      let start = 0;
+      const needle = `@${term}`;
+      while (start < source.length) {
+        const index = source.indexOf(needle, start);
+        if (index < 0) break;
+        matches.push({ id: asset.id, name: asset.name || asset.id, index, raw: needle, length: needle.length });
+        start = index + needle.length;
+      }
+    }
+  }
+  const accepted = [];
+  matches.sort((a, b) => a.index - b.index || b.length - a.length);
+  for (const match of matches) {
+    if (accepted.some((item) => rangesOverlap(match.index, match.index + match.length, item.index, item.index + item.length))) continue;
+    accepted.push(match);
+  }
+  return accepted.sort((a, b) => a.index - b.index);
+}
+
+function decodePromptMentionText(text = "") {
+  const source = String(text || "");
+  const mentions = parsePromptMentions(source);
+  if (!mentions.length) return source;
+  const pieces = [];
+  let cursor = 0;
+  for (const mention of mentions) {
+    if (mention.index < cursor) continue;
+    pieces.push(source.slice(cursor, mention.index));
+    pieces.push(`@${mention.id} ${mention.name}`);
+    cursor = mention.index + mention.raw.length;
+  }
+  pieces.push(source.slice(cursor));
+  return pieces.join("");
+}
+
+function updatePromptMentionPreview(field) {
+  const row = field?.closest(".prompt-edit-row");
+  const preview = row?.querySelector("[data-prompt-mention-preview]");
+  if (!preview) return;
+  preview.innerHTML = renderPromptMentionPreview(field.value || "");
+  preview.classList.toggle("is-empty", !String(field.value || "").trim());
+}
+
+function renderPromptMentionPreview(text = "") {
+  const source = String(text || "");
+  if (!source.trim()) return "输入 @ 可从项目资产库插入参考对象";
+  const mentions = parsePromptMentions(source);
+  if (!mentions.length) return escapeHtml(source);
+  const pieces = [];
+  let cursor = 0;
+  for (const mention of mentions) {
+    if (mention.index < cursor) continue;
+    pieces.push(escapeHtml(source.slice(cursor, mention.index)));
+    pieces.push(renderPromptMentionChip(mention));
+    cursor = mention.index + mention.raw.length;
+  }
+  pieces.push(escapeHtml(source.slice(cursor)));
+  return pieces.join("");
+}
+
+function renderPromptMentionChip(mention = {}) {
+  const asset = findClientAsset(mention.id) || { id: mention.id, name: mention.name, type: "prop", imageUrl: "" };
+  const typeLabel = assetTypeLabel(asset.type);
+  const label = asset.name || asset.id || mention.raw || "参考对象";
+  return `
+    <span class="prompt-asset-chip" title="${escapeAttr(`${typeLabel} ${label}`)}" data-asset-id="${escapeAttr(asset.id || "")}">
+      ${asset.imageUrl ? `<img src="${escapeAttr(asset.imageUrl)}" alt="${escapeAttr(label)}">` : `<i>${escapeHtml(label.slice(0, 1))}</i>`}
+      <b>${escapeHtml(typeLabel)}</b>
+      <span>${escapeHtml(label)}</span>
+    </span>
+  `;
+}
+
+function updatePromptReferenceCounter() {
+  if (!promptEditor) return;
+  const refs = collectPromptEditorRefs();
+  promptEditor.selectedRefs = new Set(refs);
+  const counter = els.promptDetailBody.querySelector("[data-prompt-ref-counter]");
+  if (counter) {
+    counter.textContent = `参考对象 ${refs.length}/${maxPromptReferenceAssets}`;
+    counter.classList.toggle("is-over", refs.length > maxPromptReferenceAssets);
+  }
+}
+
+function collectPromptEditorRefs() {
+  const refs = [];
+  els.promptDetailBody.querySelectorAll("[data-prompt-field]").forEach((field) => {
+    refs.push(...promptFieldRefs(field));
+  });
+  return [...new Set(refs)];
+}
+
+function togglePromptRequestPreview() {
+  if (!promptEditor) return;
+  promptEditor.showRequestPreview = !promptEditor.showRequestPreview;
+  const preview = els.promptDetailBody.querySelector("[data-request-preview-panel]");
+  const button = els.promptDetailBody.querySelector("[data-toggle-request-preview]");
+  if (preview) preview.classList.toggle("is-hidden", !promptEditor.showRequestPreview);
+  if (button) button.textContent = promptEditor.showRequestPreview ? "隐藏实际提交内容" : "查看实际提交内容";
+}
+
+async function savePromptPackageEdits() {
+  if (!promptEditor?.packageId) {
+    closePromptDetailModal();
+    return;
+  }
+  syncPromptTagifyEditors();
+  const payload = readPromptEditorPayload();
+  await withBusy(`prompt-edit:${promptEditor.packageId}`, async () => {
+    const data = await api.post("/api/prompt-packages/save", payload);
+    applyServerData(data);
+    render();
+    closePromptDetailModal();
+    toast("分镜提示词已保存，相关视频已标记为提示词已更新");
+  }, "保存分镜提示词失败");
+}
+
+function readPromptEditorPayload() {
+  const fields = new Map([...els.promptDetailBody.querySelectorAll("[data-prompt-field]")].map((field) => [field.dataset.promptField, field]));
+  const read = (key) => promptFieldText(fields.get(key));
+  const refs = (key) => promptFieldRefs(fields.get(key));
+  const pack = (getActiveEpisode()?.promptPackages || []).find((item) => item.id === promptEditor.packageId) || {};
+  const audio = (pack.audio || []).map((row, index) => ({
+    content: read(`audio:${index}`),
+    assetRefs: refs(`audio:${index}`)
+  }));
+  const dialogue = (pack.dialogue || []).map((row, index) => ({
+    speakerAssetId: [...refs(`dialogueText:${index}`), ...refs(`dialogueVoice:${index}`)][0] || "",
+    voice: read(`dialogueVoice:${index}`),
+    text: read(`dialogueText:${index}`)
+  }));
+  const subShots = (pack.subShots || []).map((subShot, index) => ({
+    id: subShot.id,
+    cameraLanguage: read(`subShot:${index}:cameraLanguage`),
+    blocking: read(`subShot:${index}:blocking`),
+    composition: read(`subShot:${index}:composition`),
+    action: read(`subShot:${index}:action`),
+    assetRefs: [
+      ...refs(`subShot:${index}:cameraLanguage`),
+      ...refs(`subShot:${index}:blocking`),
+      ...refs(`subShot:${index}:composition`),
+      ...refs(`subShot:${index}:action`)
+    ]
+  }));
+  return {
+    episodeId: promptEditor.episodeId,
+    packageId: promptEditor.packageId,
+    package: {
+      soundDesign: read("soundDesign"),
+      audio,
+      dialogue,
+      subShots,
+      assetRefs: collectPromptEditorRefs()
+    }
+  };
 }
 
 async function saveManualAsset(event) {
@@ -1374,7 +1909,8 @@ async function generatePromptPackagesByShot() {
   let done = 0;
   toast(`正在生成分镜提示词 0/${shots.length}`);
   await runClientPool(shots, 2, async (shot) => {
-    setJob(promptJobKey(shot.id), "running", `正在生成 ${shot.id}`);
+    const jobKey = promptJobKeyForEpisode(episode.id, shot.id);
+    setJob(jobKey, "running", `正在生成 ${shot.id}`);
     render();
     try {
       const data = await api.post("/api/generate/prompt-packages", { episodeId: episode.id, shotIds: [shot.id] });
@@ -1385,13 +1921,13 @@ async function generatePromptPackagesByShot() {
       }
       mergePromptPackagesFromState(data.state, episode.id);
       done += 1;
-      setJob(promptJobKey(shot.id), "done", `${shot.id} 完成`);
-      clearJobSoon(promptJobKey(shot.id));
+      setJob(jobKey, "done", `${shot.id} 完成`);
+      clearJobSoon(jobKey);
       toast(`正在生成分镜提示词 ${done}/${shots.length}`);
       render();
     } catch (error) {
-      setJob(promptJobKey(shot.id), "error", `${shot.id} 失败`);
-      clearJobSoon(promptJobKey(shot.id));
+      setJob(jobKey, "error", `${shot.id} 失败`);
+      clearJobSoon(jobKey);
       render();
       throw error;
     }
@@ -1424,7 +1960,7 @@ function mergePromptPackagesFromState(serverState, episodeId) {
     current.state = incomingState;
     return;
   }
-  localEpisode.promptPackages = mergeClientById(localEpisode.promptPackages || [], incomingEpisode.promptPackages || []);
+  localEpisode.promptPackages = mergePromptPackagesByShot(localEpisode.promptPackages || [], incomingEpisode.promptPackages || []);
   localEpisode.updatedAt = incomingEpisode.updatedAt || localEpisode.updatedAt;
   current.state.assetImages = mergeClientById(current.state.assetImages || [], incomingState.assetImages || []);
   current.state.cards = incomingState.cards || current.state.cards;
@@ -1438,6 +1974,14 @@ function mergeClientById(previous, next) {
     map.set(item.id, item);
   }
   return [...map.values()];
+}
+
+function mergePromptPackagesByShot(previous, next) {
+  const nextShotIds = new Set((next || []).map((item) => item.shotId).filter(Boolean));
+  return [
+    ...(previous || []).filter((item) => !nextShotIds.has(item.shotId)),
+    ...(next || [])
+  ];
 }
 
 async function runPackageAssetImages(packageId) {
@@ -1541,7 +2085,7 @@ function buildPromptPackageExport(packageId) {
   if (!episode || !pack) return null;
   const shot = (episode.shots || []).find((item) => item.id === pack.shotId) || {};
   const project = current.config?.project || {};
-  const referenceAssets = normalizeExportAssets(pack.assetReferences?.length ? pack.assetReferences : inferShotAssets(shot, clientAssetCatalog()));
+  const referenceAssets = normalizeExportAssets(promptPackageReferenceAssets(pack));
   const subShots = (pack.subShots || []).map((subShot, index) => ({
     id: subShot.id || `${pack.shotId || shot.id || "SH"}-${String(index + 1).padStart(2, "0")}`,
     timeRange: subShot.timeRange || "",
@@ -1658,6 +2202,15 @@ function normalizeExportAssets(assets = []) {
   })).filter((asset) => asset.id);
 }
 
+function promptPackageReferenceAssets(pack = {}) {
+  const ids = Array.isArray(pack.assetRefs) ? pack.assetRefs : [];
+  if (!ids.length) return [];
+  const byId = new Map((pack.assetReferences || []).map((asset) => [asset.id, asset]));
+  return uniqueAssetIds(ids)
+    .map((id) => byId.get(id) || findClientAsset(id))
+    .filter(Boolean);
+}
+
 function filterExportAssetRefs(refs = [], assets = []) {
   const allowed = new Set(assets.map((asset) => asset.id));
   return [...new Set((refs || []).filter((id) => allowed.has(id)))];
@@ -1679,15 +2232,79 @@ function buildSubShotSeedanceText(subShot = {}, assets = []) {
   ].filter(Boolean).join("\n");
 }
 
+function activeProjectStyleForSeedancePrompt(project = {}) {
+  const styles = projectStyleOptions(project);
+  const active = styles.find((style) => style.id && style.id === project.activeStyleId)
+    || styles.find((style) => style.prompt && style.prompt === project.visualStyle)
+    || null;
+  return {
+    id: active?.id || project.activeStyleId || "",
+    name: active?.name || "",
+    imageUrl: active?.imageUrl || active?.referenceImage || "",
+    prompt: active?.prompt || project.visualStyle || ""
+  };
+}
+
+function buildSeedanceReferenceBindingBlockForClient(assets = []) {
+  const imageReferences = uniqueAssets(assets).filter((asset) => asset.imageUrl).slice(0, 6);
+  if (!imageReferences.length) return "";
+  return `参考图绑定（顺序与 image_urls 完全一致）：\n${imageReferences.map((asset, index) => {
+    const label = `image_urls[${index}] = @${asset.id} ${asset.name || ""}`.trim();
+    const type = asset.type ? `，${normalizeAssetType(asset.type)}` : "";
+    return `${index + 1}. ${label}${type}。${seedanceReferenceBindingRuleForClient(asset)}`;
+  }).join("\n")}`;
+}
+
+function seedanceReferenceBindingRuleForClient(asset = {}) {
+  const type = normalizeAssetType(asset.type);
+  if (type === "character") {
+    return "这是角色身份参考图；角色出镜时必须以该图作为外观主锚点，保持脸型、发型、服装、身体比例、颜色和材质，不要被动作、光效或场景风格重塑。";
+  }
+  if (type === "location") {
+    return "这是场景/空间布局参考图；保持空间结构、地标位置、家具/环境关系、材质和整体氛围，不要把场景图当作角色外观参考。";
+  }
+  if (type === "prop") {
+    return "这是道具外观参考图；保持道具形状、颜色、材质、尺寸关系和关键识别点，不要把道具图当作角色或场景参考。";
+  }
+  return "这是视觉参考图；仅用于对应 @资产 的外观一致性，不要混用到其他资产。";
+}
+
+function buildSeedanceSubmissionSubShotBlockForClient(pack = {}, shot = {}, subShots = []) {
+  const rows = Array.isArray(subShots) ? subShots : [];
+  if (rows.length) {
+    return `分镜提示词（仅按以下时间段生成视频画面）：\n${rows.map((subShot) => [
+      subShot.timeRange ? `[${subShot.timeRange}]` : "",
+      subShot.cameraLanguage || "",
+      subShot.blocking || "",
+      subShot.composition || "",
+      subShot.action || "",
+      subShot.assetRefs?.length ? `参考资产：${subShot.assetRefs.map((id) => `@${id}`).join(" ")}` : ""
+    ].filter(Boolean).join("；")).join("\n")}`;
+  }
+  if (pack.seedancePrompt) {
+    return `分镜提示词：\n${pack.seedancePrompt}`;
+  }
+  const fallback = [
+    shot.camera || "",
+    shot.action || "",
+    shot.dialogue ? `台词：${shot.dialogue}` : "",
+    shot.continuity ? `衔接：${shot.continuity}` : ""
+  ].filter(Boolean).join("；");
+  return fallback ? `分镜提示词：\n${fallback}` : "";
+}
+
 function buildFinalSeedancePrompt(pack = {}, shot = {}, assets = [], audio = [], dialogue = [], subShots = []) {
+  const style = activeProjectStyleForSeedancePrompt(current.config?.project || {});
   return [
-    pack.seedancePrompt || buildSeedancePreview(shot, assets),
-    assets.length ? `\n指定参考资产：\n${assets.map((asset, index) => `${index + 1}. @${asset.id} ${asset.name}（${asset.typeLabel || assetTypeLabel(asset.type)}）${asset.imageUrl ? ` reference_image: ${asset.imageUrl}` : " reference_image: 未生成"}`).join("\n")}` : "",
-    pack.soundDesign ? `\n分镜音效：\n${pack.soundDesign}` : "",
-    audio.length ? `\n音效时间轴：\n${audio.map((row) => `${row.timeRange} ${row.content}${row.assetRefs?.length ? ` ｜资产：${row.assetRefs.map((id) => `@${id}`).join(" ")}` : ""}`).join("\n")}` : "",
-    dialogue.length ? `\n分镜台词：\n${dialogue.map((row) => `${row.timeRange} ${row.speaker ? `@${row.speaker}` : ""}${row.voice ? `（${row.voice}）` : ""}：${row.text}`).join("\n")}` : "",
-    subShots.length ? `\n分镜提示词：\n${subShots.map((subShot) => subShot.seedanceText).join("\n\n")}` : ""
-  ].filter(Boolean).join("\n");
+    "Seedance 2.0 视频生成提示词。请结合 image_urls 参考图生成连续视频，不要生成故事板图或首帧图。",
+    buildSeedanceReferenceBindingBlockForClient(assets),
+    style.prompt ? `项目统一风格：${style.prompt}` : "",
+    buildSeedanceSubmissionSubShotBlockForClient(pack, shot, subShots),
+    pack.soundDesign ? `分镜音效：\n${pack.soundDesign}` : "",
+    audio.length ? `音效时间轴：\n${audio.map((row) => `${row.timeRange || ""} ${row.content || ""}${row.assetRefs?.length ? ` 关联资产：${row.assetRefs.map((id) => `@${id}`).join(" ")}` : ""}`.trim()).join("\n")}` : "",
+    dialogue.length ? `分镜台词：\n${dialogue.map((row) => `${row.timeRange || ""} ${row.speakerAssetId ? `@${row.speakerAssetId}` : row.speaker ? `@${row.speaker}` : ""}${row.voice ? ` ${row.voice}` : ""}: ${row.text || ""}`.trim()).join("\n")}` : "",
+    "要求：严格保持参考图中的角色身份、场景布局、道具外观和项目风格；不要根据未绑定的文字描述重塑角色外观；不要新增未指定角色；不要生成字幕水印。"
+  ].filter(Boolean).join("\n\n");
 }
 
 function downloadJson(payload, fileName) {
@@ -1744,19 +2361,26 @@ async function withBusy(keyOrTask, taskOrFailPrefix, maybeFailPrefix) {
   } catch (error) {
     console.error(error);
     setServiceStatus("本地服务异常", false);
-    setJob(key, "error", failPrefix || "失败");
+    setJob(key, "error", failPrefix || "失败", { serverError: error.message });
     toast(`${failPrefix}: ${error.message}`);
     return false;
   } finally {
-    clearJobSoon(key);
+    if (jobs.get(key)?.status !== "error" || !shouldPersistJobError(key)) {
+      clearJobSoon(key);
+    }
   }
 }
 
-function setJob(key, status, label = "") {
+function shouldPersistJobError(key = "") {
+  return key.startsWith("prompt-package:") && !key.startsWith("prompt-package:legacy:");
+}
+
+function setJob(key, status, label = "", detail = {}) {
   jobs.set(key, {
     status,
     label,
-    updatedAt: Date.now()
+    updatedAt: Date.now(),
+    ...detail
   });
   busy = hasRunningJobs();
   renderJobFeedback();
@@ -1806,7 +2430,11 @@ function assetJobKey(assetId) {
 }
 
 function promptJobKey(shotId) {
-  return `prompt-package:${shotId}`;
+  return promptJobKeyForEpisode(getActiveEpisode()?.id, shotId);
+}
+
+function promptJobKeyForEpisode(episodeId, shotId) {
+  return `prompt-package:${[episodeId, shotId].filter(Boolean).join(":") || "global"}`;
 }
 
 function packageAssetsJobKey(packageId) {
@@ -2144,7 +2772,10 @@ function renderProjects() {
         <div class="project-card-body">
           <div class="project-card-title">
             <h3>${escapeHtml(displayProjectTitle(project))}</h3>
-            <button class="mini-action" data-project-settings="${escapeAttr(project.id)}" aria-label="项目设置">设置</button>
+            <div class="card-action-row">
+              <button class="mini-action" data-project-settings="${escapeAttr(project.id)}" aria-label="项目设置">设置</button>
+              <button class="mini-action danger" data-delete-project="${escapeAttr(project.id)}" aria-label="删除项目">删除</button>
+            </div>
           </div>
           <p>${escapeHtml(project.scriptText || "暂无剧本摘要")}</p>
           <div class="meta-line">
@@ -2167,8 +2798,11 @@ function renderSidebar(state, episode) {
   const episodes = state.episodes || [];
   els.episodeList.innerHTML = episodes.length ? episodes.map((item) => `
     <button class="episode-tab ${item.id === state.activeEpisodeId ? "is-active" : ""}" data-open-episode="${escapeAttr(item.id)}">
-      <strong>${escapeHtml(item.title)}</strong>
-      <small>${episodeStatusText(item)}</small>
+      <span class="episode-tab-main">
+        <strong>${escapeHtml(item.title)}</strong>
+        <small>${episodeStatusText(item)}</small>
+      </span>
+      <span class="episode-delete" data-delete-episode="${escapeAttr(item.id)}" aria-label="删除剧集">删除</span>
     </button>
   `).join("") : `<p class="empty mini-empty">${projectSetupComplete() ? "暂无剧集，点击上方添加剧集。" : "完善项目后可添加剧集。"}</p>`;
 }
@@ -2283,22 +2917,23 @@ function renderShots(shots, packages) {
   els.shotsOutput.innerHTML = shots.map((shot) => {
     const pack = packageByShot.get(shot.id);
     const video = videosByShot.get(shot.id) || {};
-    const assets = pack?.assetReferences?.length ? pack.assetReferences : inferShotAssets(shot, assetCatalog);
+    const assets = pack ? promptPackageReferenceAssets(pack) : inferShotAssets(shot, assetCatalog);
     const activeAssetTab = normalizeShotAssetTab(current.shotAssetTabs?.[shot.id] || "all");
     const visibleAssets = filterShotAssets(assets, activeAssetTab);
-    const promptRunning = isJobRunning(promptJobKey(shot.id));
-    const promptLocked = promptRunning || relatedJobRunning(promptJobKey(shot.id));
+    const promptKey = promptJobKey(shot.id);
+    const promptJob = jobs.get(promptKey);
+    const promptRunning = promptJob?.status === "running";
+    const promptError = promptJob?.status === "error" ? promptJob : null;
+    const promptLocked = promptRunning || relatedJobRunning(promptKey);
     const assetsRunning = isJobRunning(packageAssetsJobKey(shot.id));
     return `
       <article class="shot-pipeline-row ${promptRunning || assetsRunning ? "is-generating" : ""}">
         <section class="shot-cell shot-script-cell">
           <span class="shot-ribbon">${escapeHtml(shot.id || "镜头")}</span>
           <div class="shot-cell-actions">
-            <button type="button" aria-label="添加">＋</button>
-            <button type="button" aria-label="删除">－</button>
-            <button type="button" aria-label="编辑">✎</button>
+            <button type="button" aria-label="编辑分镜脚本" title="编辑分镜脚本" data-edit-shot="${escapeAttr(shot.id)}">✎</button>
           </div>
-          <p>${escapeHtml(formatShotScript(shot))}</p>
+          ${renderShotScriptPreview(shot)}
         </section>
         <section class="shot-cell shot-asset-cell">
           ${assetsRunning ? `<div class="cell-loading"><span class="spinner"></span><strong>正在提取资产</strong></div>` : ""}
@@ -2309,11 +2944,11 @@ function renderShots(shots, packages) {
           <button class="pipeline-action" type="button" data-generate-package-assets="${escapeAttr(shot.id)}" data-job-key="${escapeAttr(packageAssetsJobKey(shot.id))}" data-idle-text="提取资产" data-loading-text="提取中..." ${assetsRunning ? "disabled" : ""}>${assetsRunning ? "提取中..." : "提取资产"}</button>
         </section>
         <section class="shot-cell shot-prompt-cell">
-          ${promptRunning ? `<div class="pending-panel is-live"><span class="spinner"></span><strong>Seedance 提示词生成中</strong><small>可继续浏览其他分镜</small></div>` : pack ? renderPromptSummary(pack, shot, assets) : `<div class="pending-panel">待生成</div>`}
+          ${promptRunning ? `<div class="pending-panel is-live"><span class="spinner"></span><strong>Seedance 提示词生成中</strong><small>可继续浏览其他分镜</small></div>` : pack ? renderPromptSummary(pack, shot, assets) : promptError ? renderPromptError(promptError) : `<div class="pending-panel">待生成</div>`}
           <div class="prompt-action-row">
             ${pack ? `<button class="pipeline-action secondary-action" type="button" data-view-prompt="${escapeAttr(pack.id)}">查看提示词</button>` : ""}
             ${pack ? `<button class="pipeline-action secondary-action" type="button" data-export-prompt="${escapeAttr(pack.id)}">导出 JSON</button>` : ""}
-            <button class="pipeline-action" type="button" data-generate-prompt="${escapeAttr(shot.id)}" data-job-key="${escapeAttr(promptJobKey(shot.id))}" data-idle-text="${pack ? "重新生成" : "生成提示词"}" data-loading-text="生成中..." ${promptLocked ? "disabled" : ""}>${promptRunning ? "生成中..." : pack ? "重新生成" : "生成提示词"}</button>
+            <button class="pipeline-action" type="button" data-generate-prompt="${escapeAttr(shot.id)}" data-job-key="${escapeAttr(promptKey)}" data-idle-text="${pack ? "重新生成" : "生成提示词"}" data-loading-text="生成中..." ${promptLocked ? "disabled" : ""}>${promptRunning ? "生成中..." : pack ? "重新生成" : "生成提示词"}</button>
           </div>
         </section>
         <section class="shot-cell shot-video-cell">
@@ -2328,11 +2963,12 @@ function renderShotVideoPanel(shot = {}, pack = null, video = {}) {
   const shotId = shot.id || pack?.shotId || "";
   const jobKey = `video-clip:${shotId}`;
   const running = isJobRunning(jobKey);
+  const promptStale = promptPackageIsStale(pack);
   const stale = videoIsStale(video, pack);
   const status = video.status || (video.taskId ? "submitted" : "not-started");
   const pending = video.taskId && !["completed", "failed", "cancelled"].includes(String(status).toLowerCase());
-  const locked = !pack || running || relatedJobRunning(jobKey);
-  const buttonText = running ? "提交中..." : stale ? "按新提示重新生成" : video.taskId ? "重新生成" : "生成视频";
+  const locked = !pack || promptStale || running || relatedJobRunning(jobKey);
+  const buttonText = running ? "提交中..." : promptStale ? "先重新生成提示词" : stale ? "按新提示重新生成" : video.taskId ? "重新生成" : "生成视频";
   const panel = video.url
     ? `<video class="shot-video-preview" src="${escapeAttr(video.url)}" controls preload="metadata"></video>`
     : video.thumbnailUrl
@@ -2342,6 +2978,7 @@ function renderShotVideoPanel(shot = {}, pack = null, video = {}) {
     ${panel}
     <div class="shot-video-meta">
       <span class="video-status ${escapeAttr(stale ? "stale" : videoStatusTone(status))}">${escapeHtml(stale ? "提示词已更新" : videoStatusText(status))}${!stale && video.progress != null ? ` ${escapeHtml(video.progress)}%` : ""}</span>
+      ${promptStale ? `<small class="warning-text">分镜脚本已更新，请先重新生成 Seedance 提示词。</small>` : ""}
       ${stale ? `<small class="warning-text">当前视频早于最新提示词包，请重新生成视频。</small>` : ""}
       ${video.taskId ? `<small>${escapeHtml(video.taskId)}</small>` : ""}
       ${video.adapterError ? `<small class="error-box">${escapeHtml(video.adapterError)}</small>` : ""}
@@ -2353,10 +2990,14 @@ function renderShotVideoPanel(shot = {}, pack = null, video = {}) {
   `;
 }
 
+function promptPackageIsStale(pack = {}) {
+  return pack?.stale === true || Boolean(pack?.staleReason);
+}
+
 function videoIsStale(video = {}, pack = null) {
   if (!video?.id || !pack) return false;
   if (video.stale === true) return true;
-  const packTime = Date.parse(pack.createdAt || "");
+  const packTime = Date.parse(pack.updatedAt || pack.manualEditedAt || pack.createdAt || "");
   const videoTime = Date.parse(video.createdAt || "");
   return Number.isFinite(packTime) && Number.isFinite(videoTime) && packTime > videoTime;
 }
@@ -2382,7 +3023,10 @@ function renderCards(cards) {
           <div class="asset-thumb-body">
             <strong>${escapeHtml(asset.name || asset.id)}</strong>
             <small>${escapeHtml(asset.prompt || asset.description || "未填写提示词")}</small>
-            <button class="mini-action" type="button" data-generate-asset="${escapeAttr(asset.id)}" data-job-key="${escapeAttr(assetJobKey(asset.id))}" data-idle-text="${imageUrl ? "重新生成" : "生成参考图"}" data-loading-text="生成中..." ${running ? "disabled" : ""}>${running ? "生成中..." : imageUrl ? "重新生成" : "生成参考图"}</button>
+            <div class="card-action-row">
+              <button class="mini-action" type="button" data-generate-asset="${escapeAttr(asset.id)}" data-job-key="${escapeAttr(assetJobKey(asset.id))}" data-idle-text="${imageUrl ? "重新生成" : "生成参考图"}" data-loading-text="生成中..." ${running ? "disabled" : ""}>${running ? "生成中..." : imageUrl ? "重新生成" : "生成参考图"}</button>
+              <button class="mini-action danger" type="button" data-delete-asset="${escapeAttr(asset.id)}">删除</button>
+            </div>
           </div>
         </article>
       `;
@@ -2400,6 +3044,23 @@ function formatShotScript(shot = {}) {
     shot.dialogue ? `台词：${shot.dialogue}` : "",
     shot.continuity ? `衔接：${shot.continuity}` : ""
   ].filter(Boolean).join("｜");
+}
+
+function renderShotScriptPreview(shot = {}) {
+  const heading = [
+    `[${shot.durationSec || 15}s]`,
+    shot.sceneId ? `场景 ${shot.sceneId}` : "",
+    shot.shotType || ""
+  ].filter(Boolean).join(" ");
+  return `
+    <div class="shot-script-preview">
+      <h3>${escapeHtml(heading || shot.id || "分镜")}</h3>
+      ${shot.camera ? `<p><b>运镜</b>${escapeHtml(clipText(shot.camera, 92))}</p>` : ""}
+      ${shot.action ? `<p><b>画面</b>${escapeHtml(clipText(shot.action, 118))}</p>` : ""}
+      ${shot.dialogue ? `<p><b>台词</b>${escapeHtml(clipText(shot.dialogue, 72))}</p>` : ""}
+      ${shot.continuity ? `<p><b>衔接</b>${escapeHtml(clipText(shot.continuity, 72))}</p>` : ""}
+    </div>
+  `;
 }
 
 function inferShotAssets(shot = {}, assets = []) {
@@ -2462,7 +3123,8 @@ function normalizeShotAssetTab(type) {
 }
 
 function renderPromptSummary(pack, shot, assets = []) {
-  const refs = pack.assetReferences?.length ? pack.assetReferences : assets;
+  const refs = promptPackageReferenceAssets(pack);
+  const stale = promptPackageIsStale(pack);
   const summary = [
     pack.soundDesign ? `音效：${pack.soundDesign}` : "",
     (pack.dialogue || []).length ? `台词：${pack.dialogue.map((row) => `${row.speakerAssetId || "角色"}：${row.text}`).join(" / ")}` : "",
@@ -2473,50 +3135,23 @@ function renderPromptSummary(pack, shot, assets = []) {
       <div class="prompt-summary-top">
         <span class="tag">${escapeHtml(pack.durationSec || 15)}s</span>
         <span class="tag">${escapeHtml(pack.source || "local")}</span>
+        ${stale ? `<span class="tag warning-tag">分镜已更新</span>` : ""}
         <strong>${escapeHtml(pack.title || `${pack.shotId} 提示词`)}</strong>
       </div>
+      ${stale ? `<small class="prompt-summary-warning">当前提示词早于最新分镜脚本，建议重新生成。</small>` : ""}
       <p>${escapeHtml(clipText(summary, 190))}</p>
       ${renderAssetMentions(refs)}
     </div>
   `;
 }
 
-function renderPromptDetail(pack, shot = {}) {
-  const subShots = pack.subShots || [];
+function renderPromptError(job = {}) {
+  const message = job.serverError || job.label || "生成失败";
   return `
-    <section class="prompt-detail-section">
-      <h3>${escapeHtml(pack.shotId || shot.id || "分镜")} ${escapeHtml(pack.title || "")}</h3>
-      <p>${escapeHtml(shot.action || "")}</p>
-    </section>
-    <section class="prompt-detail-section">
-      <h3>分镜音效</h3>
-      ${renderPromptTextBlock(pack.soundDesign || "未生成音效描述", pack.audio || [], pack.assetReferences || [])}
-    </section>
-    <section class="prompt-detail-section">
-      <h3>分镜台词</h3>
-      ${renderPromptDialogueBlock(pack.dialogue || [], pack.assetReferences || [])}
-    </section>
-    <section class="prompt-detail-section">
-      <h3>分镜提示词</h3>
-      <div class="subshot-tab-row">
-        ${subShots.map((subShot, index) => `<button type="button" class="${index === 0 ? "is-active" : ""}" data-subshot-tab="${escapeAttr(subShot.id)}">${escapeHtml(`细分镜头${index + 1} (${subShot.timeRange || ""})`)}</button>`).join("")}
-      </div>
-      <div class="prompt-detail-list">
-        ${subShots.map((subShot, index) => `
-          <article class="${index === 0 ? "is-active" : ""}" data-subshot-panel="${escapeAttr(subShot.id)}">
-            <strong>${escapeHtml(subShot.id)} · ${escapeHtml(subShot.timeRange)}</strong>
-            <p><b>镜头语言：</b>${renderInlineAssetMentions(subShot.cameraLanguage, subShot.assetRefs || [], pack.assetReferences || [])}</p>
-            <p><b>站位：</b>${renderInlineAssetMentions(subShot.blocking, subShot.assetRefs || [], pack.assetReferences || [])}</p>
-            <p><b>构图运镜：</b>${renderInlineAssetMentions(subShot.composition, subShot.assetRefs || [], pack.assetReferences || [])}</p>
-            <p><b>动作：</b>${renderInlineAssetMentions(subShot.action, subShot.assetRefs || [], pack.assetReferences || [])}</p>
-          </article>
-        `).join("") || `<article><p>暂无细分镜头。</p></article>`}
-      </div>
-    </section>
-    <section class="prompt-detail-section">
-      <h3>Seedance Prompt</h3>
-      <pre>${escapeHtml(pack.seedancePrompt || "")}</pre>
-    </section>
+    <div class="pending-panel is-error">
+      <strong>提示词生成失败</strong>
+      <small>${escapeHtml(message)}</small>
+    </div>
   `;
 }
 
@@ -2531,6 +3166,210 @@ function renderPromptDialogueBlock(rows = [], assets = []) {
   return rows.map((row) => `
     <p><b>${escapeHtml(row.timeRange || "")}</b> ${renderAssetMention(findAssetForMention(row.speakerAssetId, assets))} ${escapeHtml(row.voice || "")}：${escapeHtml(row.text || "")}</p>
   `).join("");
+}
+
+function renderPromptDetail(pack, shot = {}) {
+  const subShots = pack.subShots || [];
+  const refs = promptEditorReferenceAssets(pack);
+  return `
+    <section class="prompt-detail-section">
+      <div class="prompt-editor-meta">
+        <div>
+          <h3>${escapeHtml(pack.shotId || shot.id || "分镜")} ${escapeHtml(pack.title || "")}</h3>
+          <p>${escapeHtml(shot.action || "")}</p>
+        </div>
+        <span class="prompt-ref-counter ${refs.length > maxPromptReferenceAssets ? "is-over" : ""}" data-prompt-ref-counter>参考对象 ${escapeHtml(refs.length)}/${escapeHtml(maxPromptReferenceAssets)}</span>
+      </div>
+      ${refs.length > maxPromptReferenceAssets ? `<p class="warning-text">视频生成最多使用 ${escapeHtml(maxPromptReferenceAssets)} 个参考图，请优先保留角色、场景和关键道具。</p>` : ""}
+    </section>
+    <section class="prompt-detail-section">
+      <h3>分镜音效</h3>
+      ${renderPromptEditRow({
+        key: "soundDesign",
+        label: "整体音效",
+        value: pack.soundDesign || "",
+        refs: uniqueAssetIds((pack.audio || []).flatMap((row) => row.assetRefs || [])),
+        multiline: true
+      })}
+      ${(pack.audio || []).map((row, index) => renderPromptEditRow({
+        key: `audio:${index}`,
+        label: row.timeRange || "音效",
+        value: row.content || "",
+        refs: row.assetRefs || [],
+        multiline: true
+      })).join("") || `<p class="muted-text">暂无音效时间轴。</p>`}
+    </section>
+    <section class="prompt-detail-section">
+      <h3>分镜台词</h3>
+      ${(pack.dialogue || []).map((row, index) => `
+        <div class="prompt-dialogue-editor">
+          <strong>${escapeHtml(row.timeRange || "台词")}</strong>
+          ${renderPromptEditRow({
+            key: `dialogueVoice:${index}`,
+            label: "声音",
+            value: row.voice || "",
+            refs: row.speakerAssetId ? [row.speakerAssetId] : []
+          })}
+          ${renderPromptEditRow({
+            key: `dialogueText:${index}`,
+            label: "文案",
+            value: row.text || "",
+            refs: row.speakerAssetId ? [row.speakerAssetId] : [],
+            multiline: true
+          })}
+        </div>
+      `).join("") || `<p class="muted-text">暂无台词。</p>`}
+    </section>
+    <section class="prompt-detail-section">
+      <h3>分镜提示词</h3>
+      <div class="subshot-tab-row">
+        ${subShots.map((subShot, index) => `<button type="button" class="${index === 0 ? "is-active" : ""}" data-subshot-tab="${escapeAttr(subShot.id)}">${escapeHtml(`细分镜头${index + 1} (${subShot.timeRange || ""})`)}</button>`).join("")}
+      </div>
+      <div class="prompt-detail-list">
+        ${subShots.map((subShot, index) => `
+          <article class="${index === 0 ? "is-active" : ""}" data-subshot-panel="${escapeAttr(subShot.id)}">
+            <strong>${escapeHtml(subShot.id)} · ${escapeHtml(subShot.timeRange)}</strong>
+            ${renderPromptEditRow({ key: `subShot:${index}:cameraLanguage`, label: "镜头语言", value: subShot.cameraLanguage || "", refs: subShot.assetRefs || [], multiline: true })}
+            ${renderPromptEditRow({ key: `subShot:${index}:blocking`, label: "站位", value: subShot.blocking || "", refs: subShot.assetRefs || [], multiline: true })}
+            ${renderPromptEditRow({ key: `subShot:${index}:composition`, label: "构图运镜", value: subShot.composition || "", refs: subShot.assetRefs || [], multiline: true })}
+            ${renderPromptEditRow({ key: `subShot:${index}:action`, label: "动作", value: subShot.action || "", refs: subShot.assetRefs || [], multiline: true })}
+          </article>
+        `).join("") || `<article><p>暂无细分镜头。</p></article>`}
+      </div>
+    </section>
+    <section class="prompt-detail-section prompt-request-preview">
+      <button type="button" data-toggle-request-preview>查看实际提交内容</button>
+      <pre class="is-hidden" data-request-preview-panel>${escapeHtml(buildFinalSeedancePrompt(
+        { ...pack, seedancePrompt: "" },
+        shot,
+        refs,
+        pack.audio || [],
+        pack.dialogue || [],
+        (pack.subShots || []).map((subShot) => ({ ...subShot, seedanceText: buildSubShotSeedanceText(subShot, refs) }))
+      ))}</pre>
+    </section>
+  `;
+}
+
+function promptEditorReferenceAssets(pack = {}) {
+  const refs = [
+    ...(pack.assetRefs || []),
+    ...(pack.audio || []).flatMap((row) => row.assetRefs || []),
+    ...(pack.dialogue || []).map((row) => row.speakerAssetId).filter(Boolean),
+    ...(pack.subShots || []).flatMap((subShot) => subShot.assetRefs || [])
+  ];
+  return uniqueAssets(refs.map((id) => findClientAsset(id)).filter(Boolean));
+}
+
+function renderPromptEditRowLegacy({ key, label, value, refs = [], multiline = false }) {
+  const uniqueRefs = uniqueAssetIds(refs).filter((id) => findClientAsset(id));
+  const editorValue = encodePromptEditorText(value || "", uniqueRefs);
+  return `
+    <div class="prompt-edit-row">
+      <label>
+        <span>${escapeHtml(label)}</span>
+        <textarea class="prompt-mention-editor ${multiline ? "is-multiline" : ""}" data-prompt-field="${escapeAttr(key)}" data-prompt-editor="true" rows="${multiline ? 3 : 1}" placeholder="输入 @ 可从项目资产库插入参考对象">${escapeHtml(editorValue)}</textarea>
+      </label>
+      <button type="button" class="prompt-mention-preview" data-prompt-mention-preview>${renderPromptMentionPreview(editorValue)}</button>
+    </div>
+  `;
+}
+
+function renderPromptEditRow({ key, label, value, refs = [], multiline = false }) {
+  const uniqueRefs = promptEditor?.manualEdited ? [] : uniqueAssetIds(refs).filter((id) => findClientAsset(id));
+  const editorValue = encodePromptEditorText(value || "", uniqueRefs);
+  return `
+    <div class="prompt-edit-row">
+      <label>
+        <span>${escapeHtml(label)}</span>
+        <textarea class="prompt-mention-editor ${multiline ? "is-multiline" : ""}" data-prompt-field="${escapeAttr(key)}" data-prompt-editor="true" rows="${multiline ? 3 : 1}" placeholder="输入 @ 可从项目资产库插入参考对象">${escapeHtml(editorValue)}</textarea>
+      </label>
+      <button type="button" class="prompt-mention-preview" data-prompt-mention-preview>${renderPromptMentionPreview(editorValue)}</button>
+    </div>
+  `;
+}
+
+function encodePromptEditorText(text = "", refs = []) {
+  const source = String(text || "");
+  const assets = uniqueAssetIds(refs).map(findClientAsset).filter(Boolean);
+  if (!assets.length || !source) return source;
+  const matches = findPromptAssetTextMatches(source, assets);
+  if (!matches.length) return `${source}${source.trim() ? " " : ""}${assets.map(promptMentionMarkup).join(" ")}`;
+  const pieces = [];
+  let cursor = 0;
+  const used = new Set();
+  matches.forEach((match) => {
+    if (match.index < cursor) return;
+    pieces.push(source.slice(cursor, match.index));
+    pieces.push(promptMentionMarkup(match.asset));
+    used.add(match.asset.id);
+    cursor = match.index + match.length;
+  });
+  pieces.push(source.slice(cursor));
+  const missing = assets.filter((asset) => !used.has(asset.id));
+  if (missing.length) {
+    pieces.push(`${pieces.join("").trim() ? " " : ""}${missing.map(promptMentionMarkup).join(" ")}`);
+  }
+  return pieces.join("");
+}
+
+function findPromptAssetTextMatches(text = "", assets = []) {
+  const source = String(text || "");
+  const searchSource = source.toLowerCase();
+  const candidates = [];
+  for (const asset of assets) {
+    for (const term of promptAssetMentionTerms(asset, assets)) {
+      const searchTerm = term.toLowerCase();
+      let start = 0;
+      while (searchTerm && start < searchSource.length) {
+        const index = searchSource.indexOf(searchTerm, start);
+        if (index < 0) break;
+        candidates.push({ index, length: term.length, asset });
+        start = index + term.length;
+      }
+    }
+  }
+  const accepted = [];
+  candidates.sort((a, b) => a.index - b.index || b.length - a.length);
+  for (const candidate of candidates) {
+    if (accepted.some((item) => rangesOverlap(candidate.index, candidate.index + candidate.length, item.index, item.index + item.length))) continue;
+    accepted.push(candidate);
+  }
+  return accepted.sort((a, b) => a.index - b.index);
+}
+
+function promptAssetMentionTerms(asset = {}, scopedAssets = []) {
+  const id = String(asset.id || "").trim();
+  const name = String(asset.name || "").trim();
+  const aliases = Array.isArray(asset.aliases) ? asset.aliases : [];
+  const aliasTerms = aliases.map((alias) => String(alias || "").trim()).filter((term) => term.length >= 2 || uniqueShortAliasForAsset(term, asset, scopedAssets));
+  const bareTerms = uniqueAssetIds([id, name, ...aliasTerms]).filter(Boolean);
+  const mentionTerms = bareTerms.map((term) => `@${term}`);
+  if (id && name && id !== name) {
+    mentionTerms.push(`@${id} ${name}`, `@${id}${name}`);
+  }
+  return uniqueAssetIds([...mentionTerms, ...bareTerms]).sort((a, b) => b.length - a.length);
+}
+
+function promptMentionParseTerms(asset = {}, scopedAssets = []) {
+  return promptAssetMentionTerms(asset, scopedAssets)
+    .map((term) => term.replace(/^@/, ""))
+    .filter(Boolean);
+}
+
+function uniqueShortAliasForAsset(alias = "", asset = {}, scopedAssets = []) {
+  const value = String(alias || "").trim();
+  if (value.length !== 1) return false;
+  const sameAliasAssets = scopedAssets.filter((item) => (item.aliases || []).map((name) => String(name || "").trim()).includes(value));
+  return sameAliasAssets.length === 1 && sameAliasAssets[0]?.id === asset.id;
+}
+
+function rangesOverlap(startA, endA, startB, endB) {
+  return startA < endB && startB < endA;
+}
+
+function uniqueAssetIds(ids = []) {
+  return [...new Set((ids || []).map((id) => String(id || "").trim()).filter(Boolean))];
 }
 
 function renderAssetMentions(assets = []) {
@@ -2651,9 +3490,12 @@ function renderVideos(packages, shots) {
 
 function renderVideoClipCard(pack = {}, shot = {}, video = {}) {
   const status = video.status || (video.taskId ? "submitted" : "not-started");
+  const promptStale = promptPackageIsStale(pack);
   const stale = videoIsStale(video, pack);
   const pending = video.taskId && !["completed", "failed", "cancelled"].includes(String(status).toLowerCase());
   const jobKey = `video-clip:${pack.shotId || shot.id || pack.id}`;
+  const disabled = promptStale || isJobRunning(jobKey);
+  const buttonText = isJobRunning(jobKey) ? "提交中..." : promptStale ? "先重新生成提示词" : stale ? "按新提示重新提交" : video.taskId ? "重新提交" : "生成此片段";
   const refs = video.referenceImages?.length ? video.referenceImages : (pack.assetReferences || []).map((asset) => ({
     id: asset.id,
     name: asset.name,
@@ -2674,12 +3516,13 @@ function renderVideoClipCard(pack = {}, shot = {}, video = {}) {
           <span class="video-status ${escapeAttr(stale ? "stale" : videoStatusTone(status))}">${escapeHtml(stale ? "提示词已更新" : videoStatusText(status))}${!stale && video.progress != null ? ` ${escapeHtml(video.progress)}%` : ""}</span>
         </div>
         <p>${escapeHtml(clipText(video.prompt || pack.seedancePrompt || shot.action || "", 220))}</p>
+        ${promptStale ? `<p class="warning-text">分镜脚本已更新，请先回到分镜制作重新生成 Seedance 提示词。</p>` : ""}
         ${stale ? `<p class="warning-text">当前视频早于最新提示词包，请重新生成视频。</p>` : ""}
         ${video.taskId ? `<small class="task-id">task_id: ${escapeHtml(video.taskId)}</small>` : ""}
         ${video.adapterError ? `<p class="error-box">${escapeHtml(video.adapterError)}</p>` : ""}
         ${refs.length ? `<div class="video-ref-strip">${refs.map((asset) => `<span>${asset.url ? `<img src="${escapeAttr(asset.url)}" alt="${escapeAttr(asset.name || asset.id)}">` : ""}<b>@${escapeHtml(asset.id || "")}</b>${escapeHtml(asset.name || "")}</span>`).join("")}</div>` : ""}
         <div class="button-row prompt-export-row">
-          <button type="button" data-generate-video-clip="${escapeAttr(pack.shotId || shot.id || "")}" data-job-key="${escapeAttr(jobKey)}" data-idle-text="${stale ? "按新提示重新提交" : video.taskId ? "重新提交" : "生成此片段"}" data-loading-text="提交中...">${isJobRunning(jobKey) ? "提交中..." : stale ? "按新提示重新提交" : video.taskId ? "重新提交" : "生成此片段"}</button>
+          <button type="button" data-generate-video-clip="${escapeAttr(pack.shotId || shot.id || "")}" data-job-key="${escapeAttr(jobKey)}" data-idle-text="${escapeAttr(buttonText)}" data-loading-text="提交中..." ${disabled ? "disabled" : ""}>${escapeHtml(buttonText)}</button>
           ${pending ? `<button type="button" data-refresh-video-task>刷新状态</button>` : ""}
           <button type="button" data-copy-prompt="${escapeAttr(pack.id || "")}">复制提示词包</button>
         </div>
@@ -2906,6 +3749,33 @@ function findClientAsset(id) {
   return clientAssetCatalog().find((asset) => asset.id === id) || null;
 }
 
+function assetUsageSummary(assetId) {
+  const episodes = current.state?.episodes || [];
+  const historyCount = (current.state?.assetImageHistory?.[assetId] || []).length;
+  let shots = 0;
+  let packages = 0;
+  let videos = 0;
+  for (const episode of episodes) {
+    shots += (episode.shots || []).filter((shot) => (shot.assetRefs || []).includes(assetId)).length;
+    packages += (episode.promptPackages || []).filter((pack) => promptPackageUsesAsset(pack, assetId)).length;
+    videos += (episode.videos || []).filter((video) => videoUsesAsset(video, assetId)).length;
+  }
+  return { historyCount, shots, packages, videos };
+}
+
+function promptPackageUsesAsset(pack = {}, assetId = "") {
+  return (pack.assetRefs || []).includes(assetId)
+    || (pack.assetReferences || []).some((asset) => asset.id === assetId)
+    || (pack.audio || []).some((row) => (row.assetRefs || []).includes(assetId))
+    || (pack.dialogue || []).some((row) => row.speakerAssetId === assetId)
+    || (pack.subShots || []).some((subShot) => (subShot.assetRefs || []).includes(assetId));
+}
+
+function videoUsesAsset(video = {}, assetId = "") {
+  return (video.referenceImages || []).some((image) => image.id === assetId)
+    || String(video.prompt || "").includes(assetId);
+}
+
 function projectStyleOptions(project = {}) {
   const parsed = parseProjectStyles(project.projectStyles);
   const styles = parsed.length ? parsed : [];
@@ -3041,4 +3911,491 @@ function escapeHtml(value) {
 
 function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, "&#96;");
+}
+
+// Tagify mixed-mode editor overrides for inline asset chips in Seedance prompt fields.
+function promptFieldRefs(field) {
+  const source = promptTagifyFieldValue(field);
+  return uniqueAssetIds([
+    ...parsePromptTagifyMentions(source).map((item) => item.id),
+    ...parsePromptMentions(decodePromptTagifyText(source)).map((item) => item.id)
+  ]);
+}
+
+function promptFieldText(field) {
+  if (!field) return "";
+  return decodePromptMentionText(decodePromptTagifyText(promptTagifyFieldValue(field))).trim();
+}
+
+function promptTagifyFieldValue(field) {
+  const entry = promptTagifyEntryForField(field);
+  if (entry?.tagify) {
+    entry.tagify.updateValueByDOMTags();
+    entry.tagify.update({ withoutChangeEvent: true });
+  }
+  return String(field?.value || "");
+}
+
+function promptTagifyEntryForField(field) {
+  if (!field) return null;
+  return (promptEditor?.tagifyFields || []).find((entry) => entry.field === field) || null;
+}
+
+function syncPromptTagifyEditors() {
+  (promptEditor?.tagifyFields || []).forEach(({ tagify }) => {
+    tagify.updateValueByDOMTags();
+    tagify.update({ withoutChangeEvent: true });
+  });
+}
+
+function attachPromptMentionEditors() {
+  if (!promptEditor) return;
+  const fields = [...els.promptDetailBody.querySelectorAll("[data-prompt-editor]")];
+  promptEditor.attachedFields = fields;
+  if (typeof Tagify === "undefined") {
+    toast("提示词 @ 标签编辑器未加载");
+    return;
+  }
+  promptEditor.tagifyFields = fields.map((field) => {
+    const tagify = new Tagify(field, {
+      mode: "mix",
+      pattern: /@/,
+      tagTextProp: "name",
+      enforceWhitelist: true,
+      duplicates: true,
+      whitelist: promptMentionValues(),
+      dropdown: {
+        enabled: 0,
+        position: "text",
+        highlightFirst: true,
+        maxItems: 20,
+        classname: "prompt-tagify-dropdown",
+        searchKeys: ["value", "name", "id", "aliasesText"]
+      },
+      templates: {
+        tag: tagifyAssetTagTemplate,
+        dropdownItem: tagifyAssetDropdownTemplate
+      },
+      transformTag(tagData) {
+        const asset = findClientAsset(tagData.id || tagData.value) || tagData;
+        tagData.id = asset.id || tagData.id || tagData.value;
+        tagData.value = asset.id || tagData.value;
+        tagData.name = asset.name || tagData.name || tagData.value;
+        tagData.type = normalizeAssetType(asset.type || tagData.type);
+        tagData.imageUrl = asset.imageUrl || tagData.imageUrl || "";
+        tagData.aliasesText = Array.isArray(asset.aliases) ? asset.aliases.join(" ") : tagData.aliasesText || "";
+      }
+    });
+    tagify.on("add", schedulePromptReferenceCounter);
+    tagify.on("remove", schedulePromptReferenceCounter);
+    tagify.on("input", schedulePromptReferenceCounter);
+    tagify.on("change", schedulePromptReferenceCounter);
+    return { field, tagify };
+  });
+  schedulePromptReferenceCounter();
+}
+
+function detachPromptMentionEditors() {
+  (promptEditor?.tagifyFields || []).forEach(({ tagify }) => tagify.destroy());
+}
+
+function schedulePromptReferenceCounter() {
+  window.setTimeout(updatePromptReferenceCounter, 120);
+}
+
+function promptMentionValues() {
+  return (promptEditor?.assetCatalog || []).map((asset) => {
+    const name = asset.name || asset.id;
+    return {
+      value: asset.id,
+      id: asset.id,
+      name,
+      type: normalizeAssetType(asset.type),
+      imageUrl: asset.imageUrl || "",
+      aliasesText: uniqueAssetIds([...(asset.aliases || []), asset.id, name]).join(" ")
+    };
+  });
+}
+
+function tagifyAssetTagTemplate(tagData) {
+  const asset = findClientAsset(tagData.id || tagData.value) || tagData;
+  const typeLabel = assetTypeLabel(asset.type || tagData.type);
+  const name = asset.name || tagData.name || tagData.value || "参考对象";
+  const imageUrl = asset.imageUrl || tagData.imageUrl || "";
+  return `
+    <tag title="${escapeAttr(`${typeLabel} ${name}`)}" contenteditable="false" spellcheck="false" tabindex="-1" class="${this.settings.classNames.tag} prompt-asset-mix-chip" ${this.getAttributes(tagData)}>
+      <div>
+        ${imageUrl ? `<img src="${escapeAttr(imageUrl)}" alt="${escapeAttr(name)}">` : `<i>${escapeHtml(String(name).slice(0, 1))}</i>`}
+        <b>${escapeHtml(typeLabel)}</b>
+        <span class="${this.settings.classNames.tagText}">${escapeHtml(name)}</span>
+      </div>
+    </tag>
+  `;
+}
+
+function tagifyAssetDropdownTemplate(tagData) {
+  const typeLabel = assetTypeLabel(tagData.type);
+  const name = tagData.name || tagData.value || "参考对象";
+  return `
+    <div ${this.getAttributes(tagData)} class="${this.settings.classNames.dropdownItem} prompt-tagify-option" tabindex="0" role="option">
+      ${tagData.imageUrl ? `<img src="${escapeAttr(tagData.imageUrl)}" alt="${escapeAttr(name)}">` : `<i>${escapeHtml(String(name).slice(0, 1))}</i>`}
+      <strong>${escapeHtml(name)}</strong>
+      <small>${escapeHtml(typeLabel)}</small>
+    </div>
+  `;
+}
+
+function parsePromptTagifyMentions(text = "") {
+  return parsePromptTagifyFragments(text).flatMap((fragment) => fragment.items.map((item) => ({
+    ...item,
+    index: fragment.index,
+    raw: fragment.raw,
+    length: fragment.length
+  })));
+}
+
+function parsePromptTagifyFragments(text = "") {
+  const source = String(text || "");
+  const fragments = [];
+  let index = 0;
+  while (index < source.length) {
+    if (source.startsWith("[[", index)) {
+      const end = source.indexOf("]]", index + 2);
+      if (end >= 0) {
+        const raw = source.slice(index, end + 2);
+        const items = parsePromptTagifyDataItems(source.slice(index + 2, end));
+        if (items.length) {
+          fragments.push({ index, raw, length: raw.length, items });
+          index = end + 2;
+          continue;
+        }
+      }
+    }
+    if (source[index] === "[" || source[index] === "{") {
+      const end = findPromptJsonFragmentEnd(source, index);
+      if (end > index) {
+        const raw = source.slice(index, end);
+        const items = parsePromptTagifyDataItems(raw);
+        if (items.length) {
+          fragments.push({ index, raw, length: raw.length, items });
+          index = end;
+          continue;
+        }
+      }
+    }
+    index += 1;
+  }
+  return fragments;
+}
+
+function parsePromptTagifyData(value = "") {
+  const source = String(value || "");
+  try {
+    const data = JSON.parse(source);
+    return data && typeof data === "object" ? data : null;
+  } catch {
+    const unescaped = source.replace(/\\"/g, "\"");
+    if (unescaped === source) return null;
+    try {
+      const data = JSON.parse(unescaped);
+      return data && typeof data === "object" ? data : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+function parsePromptTagifyDataItems(value = "") {
+  const data = parsePromptTagifyData(value);
+  const rows = Array.isArray(data) ? data : [data];
+  return rows.map(normalizePromptTagifyData).filter(Boolean);
+}
+
+function normalizePromptTagifyData(data = {}) {
+  if (!data || typeof data !== "object") return null;
+  const id = String(data.id || data.value || "").trim();
+  if (!id) return null;
+  const asset = findClientAsset(id);
+  if (!asset && !data.name && !data.type && !data.imageUrl) return null;
+  return {
+    id,
+    name: asset?.name || data.name || id,
+    type: normalizeAssetType(asset?.type || data.type),
+    imageUrl: asset?.imageUrl || data.imageUrl || ""
+  };
+}
+
+function findPromptJsonFragmentEnd(source = "", start = 0) {
+  const opener = source[start];
+  if (opener !== "[" && opener !== "{") return -1;
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "[" || char === "{") {
+      stack.push(char);
+      continue;
+    }
+    if (char !== "]" && char !== "}") continue;
+    const expected = char === "]" ? "[" : "{";
+    if (stack.pop() !== expected) return -1;
+    if (!stack.length) return index + 1;
+  }
+  return -1;
+}
+
+function decodePromptTagifyText(text = "") {
+  const source = String(text || "");
+  const fragments = parsePromptTagifyFragments(source);
+  if (!fragments.length) return source;
+  const pieces = [];
+  let cursor = 0;
+  fragments.forEach((fragment) => {
+    if (fragment.index < cursor) return;
+    pieces.push(source.slice(cursor, fragment.index));
+    pieces.push(fragment.items.map((item) => `@${item.id} ${item.name}`).join(" "));
+    cursor = fragment.index + fragment.length;
+  });
+  pieces.push(source.slice(cursor));
+  return pieces.join("");
+}
+
+function renderPromptEditRow({ key, label, value, refs = [], multiline = false }) {
+  const uniqueRefs = uniqueAssetIds(refs).filter((id) => findClientAsset(id));
+  const editorValue = encodePromptEditorText(value || "", uniqueRefs);
+  return `
+    <div class="prompt-edit-row">
+      <label>
+        <span>${escapeHtml(label)}</span>
+        <textarea class="prompt-mention-editor ${multiline ? "is-multiline" : ""}" data-prompt-field="${escapeAttr(key)}" data-prompt-editor="true" rows="${multiline ? 3 : 1}" placeholder="输入 @ 可从项目资产库插入参考对象">${escapeHtml(encodePromptTagifyText(editorValue))}</textarea>
+      </label>
+    </div>
+  `;
+}
+
+function encodePromptTagifyText(text = "") {
+  const source = String(text || "");
+  const mentions = parsePromptMentions(source);
+  if (!mentions.length) return source;
+  const pieces = [];
+  let cursor = 0;
+  for (const mention of mentions) {
+    if (mention.index < cursor) continue;
+    pieces.push(source.slice(cursor, mention.index));
+    const asset = findClientAsset(mention.id) || { id: mention.id, name: mention.name, type: "prop", imageUrl: "" };
+    pieces.push(`[[${JSON.stringify({
+      value: asset.id,
+      id: asset.id,
+      name: asset.name || asset.id,
+      type: normalizeAssetType(asset.type),
+      imageUrl: asset.imageUrl || ""
+    })}]]`);
+    cursor = mention.index + mention.raw.length;
+  }
+  pieces.push(source.slice(cursor));
+  return pieces.join("");
+}
+
+// Final prompt draft editor implementation: current visible Tagify content is the source of truth.
+function attachPromptMentionEditors() {
+  if (!promptEditor) return;
+  const fields = [...els.promptDetailBody.querySelectorAll("[data-prompt-editor]")];
+  promptEditor.attachedFields = fields;
+  promptEditor.tagifyFields = [];
+  if (typeof Tagify === "undefined") {
+    toast("提示词 @ 标签编辑器未加载");
+    return;
+  }
+  fields.forEach((field) => {
+    const tagify = new Tagify(field, {
+      mode: "mix",
+      pattern: /@/,
+      tagTextProp: "name",
+      enforceWhitelist: true,
+      duplicates: true,
+      whitelist: promptMentionValues(),
+      dropdown: {
+        enabled: 0,
+        position: "text",
+        highlightFirst: true,
+        maxItems: 20,
+        classname: "prompt-tagify-dropdown",
+        searchKeys: ["value", "name", "id", "aliasesText"]
+      },
+      templates: {
+        tag: tagifyAssetTagTemplate,
+        dropdownItem: tagifyAssetDropdownTemplate
+      },
+      transformTag(tagData) {
+        const asset = findClientAsset(tagData.id || tagData.value) || tagData;
+        tagData.id = asset.id || tagData.id || tagData.value;
+        tagData.value = asset.id || tagData.value;
+        tagData.name = asset.name || tagData.name || tagData.value;
+        tagData.type = normalizeAssetType(asset.type || tagData.type);
+        tagData.imageUrl = asset.imageUrl || tagData.imageUrl || "";
+        tagData.aliasesText = Array.isArray(asset.aliases) ? asset.aliases.join(" ") : tagData.aliasesText || "";
+      }
+    });
+    tagify.on("add", schedulePromptReferenceCounter);
+    tagify.on("remove", schedulePromptReferenceCounter);
+    tagify.on("input", schedulePromptReferenceCounter);
+    tagify.on("change", schedulePromptReferenceCounter);
+    promptEditor.tagifyFields.push({ field, tagify });
+  });
+  updatePromptReferenceCounter();
+}
+
+function detachPromptMentionEditors() {
+  (promptEditor?.tagifyFields || []).forEach(({ tagify }) => tagify.destroy());
+  if (promptEditor) promptEditor.tagifyFields = [];
+}
+
+function renderPromptEditRow({ key, label, value, refs = [], multiline = false }) {
+  const editorValue = promptEditorInitialValue(value || "", refs);
+  return `
+    <div class="prompt-edit-row">
+      <label>
+        <span>${escapeHtml(label)}</span>
+        <textarea class="prompt-mention-editor ${multiline ? "is-multiline" : ""}" data-prompt-field="${escapeAttr(key)}" data-prompt-editor="true" rows="${multiline ? 3 : 1}" placeholder="输入 @ 可从项目资产库插入参考对象">${escapeHtml(encodePromptTagifyText(editorValue))}</textarea>
+      </label>
+    </div>
+  `;
+}
+
+function promptEditorInitialValue(text = "", refs = []) {
+  const source = decodePromptMentionText(decodePromptTagifyText(text || ""));
+  if (!source.trim()) return "";
+  const visibleMentions = parsePromptMentions(source);
+  if (visibleMentions.length) return source;
+  if (promptEditor?.manualEdited) return source;
+  return insertPromptRefsIntoExistingText(source, refs);
+}
+
+function insertPromptRefsIntoExistingText(text = "", refs = []) {
+  const source = String(text || "");
+  const assets = uniqueAssetIds(refs).map(findClientAsset).filter(Boolean);
+  if (!assets.length) return source;
+  const matches = findPromptAssetTextMatches(source, assets);
+  if (!matches.length) return source;
+  const pieces = [];
+  let cursor = 0;
+  for (const match of matches) {
+    if (match.index < cursor) continue;
+    pieces.push(source.slice(cursor, match.index));
+    pieces.push(promptMentionDisplay(match.asset));
+    cursor = match.index + match.length;
+  }
+  pieces.push(source.slice(cursor));
+  return pieces.join("");
+}
+
+function promptFieldRefs(field) {
+  return promptDraftField(field).refs;
+}
+
+function promptFieldText(field) {
+  return promptDraftField(field).text;
+}
+
+function promptDraftField(field) {
+  const raw = promptTagifyFieldValue(field);
+  const text = decodePromptMentionText(decodePromptTagifyText(raw));
+  const refs = [
+    ...parsePromptTagifyMentions(raw).map((item) => item.id),
+    ...parsePromptMentions(text).map((item) => item.id)
+  ];
+  return {
+    refs: uniqueAssetIds(refs),
+    text: text.trim()
+  };
+}
+
+function promptTagifyFieldValue(field) {
+  const entry = promptTagifyEntryForField(field);
+  if (entry?.tagify) return promptTagifyValueFromDom(entry.tagify);
+  return String(field?.value || "");
+}
+
+function promptTagifyValueFromDom(tagify) {
+  const input = tagify?.DOM?.input;
+  if (!input) return "";
+  return promptTagifySerializeNode(input).trim();
+}
+
+function promptTagifySerializeNode(root) {
+  const pieces = [];
+  root.childNodes.forEach((node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      pieces.push(node.nodeValue || "");
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    if (node.tagName === "BR") {
+      pieces.push("\n");
+      return;
+    }
+    if (node.matches?.(".tagify__tag")) {
+      const data = node.__tagifyTagData || {};
+      const id = data.id || data.value || "";
+      const asset = findClientAsset(id) || data;
+      if (id) {
+        pieces.push(`[[${JSON.stringify({
+          value: id,
+          id,
+          name: asset.name || data.name || id,
+          type: normalizeAssetType(asset.type || data.type),
+          imageUrl: asset.imageUrl || data.imageUrl || ""
+        })}]]`);
+      }
+      return;
+    }
+    pieces.push(promptTagifySerializeNode(node));
+  });
+  return pieces.join("");
+}
+
+function syncPromptTagifyEditors() {
+  (promptEditor?.tagifyFields || []).forEach(({ field, tagify }) => {
+    const value = promptTagifyValueFromDom(tagify);
+    field.value = value;
+    if (tagify.DOM?.originalInput) tagify.DOM.originalInput.value = value;
+  });
+}
+
+function encodePromptTagifyText(text = "") {
+  const source = decodePromptTagifyText(text || "");
+  const mentions = parsePromptMentions(source);
+  if (!mentions.length) return source;
+  const pieces = [];
+  let cursor = 0;
+  for (const mention of mentions) {
+    if (mention.index < cursor) continue;
+    pieces.push(source.slice(cursor, mention.index));
+    const asset = findClientAsset(mention.id) || { id: mention.id, name: mention.name, type: "prop", imageUrl: "" };
+    pieces.push(`[[${JSON.stringify({
+      value: asset.id,
+      id: asset.id,
+      name: asset.name || asset.id,
+      type: normalizeAssetType(asset.type),
+      imageUrl: asset.imageUrl || ""
+    })}]]`);
+    cursor = mention.index + mention.raw.length;
+  }
+  pieces.push(source.slice(cursor));
+  return pieces.join("");
 }

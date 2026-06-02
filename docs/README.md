@@ -8,12 +8,15 @@
 - [模块拆分](./module-map.md)：按产品模块和工程模块拆分当前工作台。
 - [制作流程](./workflow.md)：梳理从创建项目到生成视频片段的完整链路。
 - [模型与提示词](./model-and-prompt-flow.md)：说明 LLM、生图、视频模型分别在何处调用，以及提示词包如何进入 Seedance。
+- [分镜脚本生成与资产提取标准](./shot-script-asset-extraction-standard.md)：定义 15s 分镜内容量控制、前端可视化编辑、资产提取和资产合并校验标准。
+- [Prompt Mention Editor Standard](./prompt-mention-editor-standard.md)：记录 inline asset chip 编辑器的实现标准。
 - [数据与缓存](./data-storage.md)：说明本地 JSON、缓存目录、运行记录和敏感配置的管理方式。
-- [运行与版本管理](./operations-and-release.md)：说明本地启动、Git 基线、发布/交付注意事项。
+- [运行与版本管理](./operations-and-release.md)：说明本地启动、Git 基线、发布交付注意事项。
+- [开发流程标准](./development-workflow.md)：说明 master、dev、feature、fix 分支的使用规则和发布节奏。
 
 ## v1.0 管理原则
 
-1. v1.0 是当前稳定工作版本，后续功能开发应先从该版本创建新提交。
+1. v1.0 是当前稳定工作版本，后续功能开发应先从该版本创建新分支。
 2. 不把本地密钥、项目运行数据、生成缓存、视频成品纳入 Git。
 3. 后续如果要改模型标准，应新增 profile/adapter，不直接破坏 Seedance 2.0 已跑通流程。
 4. 产品流程文档和代码实现应一起维护，避免后续 UI、提示词和数据结构脱节。

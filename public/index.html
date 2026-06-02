@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI 漫剧工作台</title>
+  <link rel="stylesheet" href="/vendor/tagify.css">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -384,6 +385,19 @@
     </div>
   </div>
 
+  <div id="confirmDeleteModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="confirmDeleteTitle">
+    <div class="modal-card confirm-modal-card">
+      <button id="closeConfirmDeleteBtn" class="modal-close" aria-label="关闭">脳</button>
+      <p class="eyebrow">Delete Confirm</p>
+      <h2 id="confirmDeleteTitle">确认删除</h2>
+      <div id="confirmDeleteBody" class="confirm-delete-body"></div>
+      <div class="modal-actions">
+        <button id="cancelConfirmDeleteBtn" type="button">取消</button>
+        <button id="confirmDeleteBtn" class="danger danger-fill" type="button">删除</button>
+      </div>
+    </div>
+  </div>
+
   <div id="modelCenterModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="modelCenterTitle">
     <div class="modal-card model-center-modal-card">
       <button id="closeModelCenterBtn" class="modal-close" aria-label="关闭">×</button>
@@ -498,6 +512,35 @@
     </div>
   </div>
 
+  <div id="shotEditorModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="shotEditorTitle">
+    <div class="modal-card shot-editor-modal-card">
+      <button id="closeShotEditorBtn" class="modal-close" aria-label="关闭">×</button>
+      <div class="prompt-detail-head">
+        <div>
+          <p class="eyebrow">Shot Script</p>
+          <h2 id="shotEditorTitle">编辑分镜脚本</h2>
+        </div>
+        <span id="shotEditorMeta" class="tag">15s</span>
+      </div>
+      <form id="shotEditorForm" class="shot-editor-form">
+        <div class="shot-editor-grid">
+          <label><span>场景 ID</span><input name="sceneId" autocomplete="off"></label>
+          <label><span>镜头类型</span><input name="shotType" autocomplete="off"></label>
+        </div>
+        <label><span>运镜</span><textarea name="camera" rows="5"></textarea></label>
+        <label><span>画面动作</span><textarea name="action" rows="6"></textarea></label>
+        <label><span>台词 / 旁白</span><textarea name="dialogue" rows="4"></textarea></label>
+        <label><span>关键元素 / 资产提示</span><textarea name="assetNotes" rows="4"></textarea></label>
+        <label><span>视觉备注</span><textarea name="visualNotes" rows="4"></textarea></label>
+        <label><span>连续性 / 衔接状态</span><textarea name="continuity" rows="4"></textarea></label>
+        <div class="modal-actions prompt-detail-actions">
+          <button id="cancelShotEditorBtn" type="button">取消</button>
+          <button id="saveShotEditorBtn" class="primary" type="submit">保存分镜</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="eventsModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="eventsModalTitle">
     <div class="modal-card events-modal-card">
       <button id="closeEventsModalBtn" class="modal-close" aria-label="关闭">×</button>
@@ -513,6 +556,7 @@
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/vendor/tagify.min.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
