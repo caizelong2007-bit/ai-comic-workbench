@@ -1185,7 +1185,7 @@ legend {
 
 .shot-pipeline-row {
   display: grid;
-  grid-template-columns: minmax(300px, 1fr) minmax(300px, 1fr) minmax(300px, 1fr) minmax(300px, 1fr);
+  grid-template-columns: 320px minmax(300px, 1fr) minmax(300px, 1fr) minmax(300px, 1fr);
   gap: 8px;
   align-items: stretch;
 }
@@ -1209,6 +1209,39 @@ legend {
   line-height: 1.8;
 }
 
+.shot-script-preview {
+  display: grid;
+  gap: 9px;
+  width: 100%;
+  max-width: 292px;
+}
+
+.shot-script-preview h3 {
+  margin: 0;
+  overflow: hidden;
+  color: #273142;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shot-script-preview p {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #3f4b5f;
+  font-size: 12px;
+  line-height: 1.65;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.shot-script-preview p b {
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--purple-dark);
+  font-size: 11px;
+}
+
 .shot-cell-actions {
   position: absolute;
   top: 10px;
@@ -1226,6 +1259,11 @@ legend {
   background: transparent;
   font-size: 20px;
   line-height: 1;
+}
+
+.shot-cell-actions button:not(:disabled):hover {
+  color: var(--purple-dark);
+  box-shadow: none;
 }
 
 .shot-asset-cell {
@@ -1467,6 +1505,17 @@ legend {
   font-size: 12px;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
+}
+
+.prompt-summary-warning {
+  color: #a05a00;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.warning-tag {
+  color: #8a4b00;
+  background: #fff4d8;
 }
 
 .prompt-action-row {
@@ -2154,6 +2203,45 @@ legend {
   grid-template-rows: auto minmax(0, 1fr) auto;
   padding: 0;
   overflow: hidden;
+}
+
+.shot-editor-modal-card {
+  width: min(980px, calc(100vw - 36px));
+  max-height: calc(100vh - 42px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding: 0;
+  overflow: hidden;
+}
+
+.shot-editor-form {
+  display: grid;
+  gap: 14px;
+  padding: 16px 20px 18px;
+  overflow: auto;
+  background: #fff;
+}
+
+.shot-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.shot-editor-form label {
+  display: grid;
+  gap: 7px;
+}
+
+.shot-editor-form label span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.shot-editor-form textarea {
+  min-height: 96px;
+  line-height: 1.7;
 }
 
 .prompt-detail-head {

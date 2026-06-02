@@ -330,6 +330,11 @@ async function route(req, res) {
     return sendJson(res, 200, await savePromptPackageEdits(body));
   }
 
+  if (pathname === "/api/shots/save" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await saveShotEdits(body));
+  }
+
   if (pathname === "/api/reset" && req.method === "POST") {
     const state = freshState();
     await writeState(state);
@@ -735,6 +740,88 @@ function promptPackageJobScope(episodeId = "", shotId = "") {
   return episodeScope ? `${episodeScope}:${shotScope}` : shotScope;
 }
 
+async function saveShotEdits(payload = {}) {
+  const shotId = stringOr(payload.shotId || payload.id, "");
+  if (!shotId) {
+    throw new Error("Missing shot id");
+  }
+  const latestState = await withStateWriteLock(async () => {
+    const state = await readState();
+    const episode = payload.episodeId
+      ? (state.episodes || []).find((item) => item.id === payload.episodeId)
+      : requireActiveEpisode(state);
+    if (!episode) {
+      throw new Error("Episode not found");
+    }
+    const index = (episode.shots || []).findIndex((shot) => shot.id === shotId);
+    if (index < 0) {
+      throw new Error("Shot not found");
+    }
+    const updatedAt = new Date().toISOString();
+    const currentShot = episode.shots[index];
+    const edited = mergeShotEdits(currentShot, payload.shot || payload, updatedAt);
+    episode.shots[index] = edited;
+    episode.promptPackages = (episode.promptPackages || []).map((pack) => pack.shotId === shotId
+      ? {
+        ...pack,
+        stale: true,
+        staleReason: "shot-manual-edit",
+        staleAt: updatedAt
+      }
+      : pack);
+    episode.videos = (episode.videos || []).map((video) => video.shotId === shotId
+      ? {
+        ...video,
+        stale: true,
+        staleReason: "shot-manual-edit",
+        staleAt: updatedAt
+      }
+      : video);
+    touchEpisode(episode);
+    touchState(state);
+    addEvent(state, "shot.edited", `${episode.title} 已人工修改 ${shotId} 分镜脚本`, "user");
+    await writeState(state);
+    await syncActiveProject({ state });
+    return state;
+  });
+  return { ok: true, state: latestState };
+}
+
+function mergeShotEdits(currentShot = {}, patch = {}, updatedAt = new Date().toISOString()) {
+  const next = {
+    ...currentShot,
+    shotType: editableString(patch.shotType, currentShot.shotType || ""),
+    camera: editableString(patch.camera, currentShot.camera || ""),
+    action: editableString(patch.action, currentShot.action || ""),
+    dialogue: editableString(patch.dialogue, currentShot.dialogue || ""),
+    assetNotes: editableString(patch.assetNotes, currentShot.assetNotes || ""),
+    visualNotes: editableString(patch.visualNotes, currentShot.visualNotes || ""),
+    continuity: editableString(patch.continuity, currentShot.continuity || ""),
+    manualEditedAt: updatedAt,
+    updatedAt
+  };
+  if (Object.prototype.hasOwnProperty.call(patch, "sceneId")) {
+    next.sceneId = editableString(patch.sceneId, currentShot.sceneId || "");
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "imagePrompt")) {
+    next.imagePrompt = editableString(patch.imagePrompt, currentShot.imagePrompt || "");
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "videoPrompt")) {
+    next.videoPrompt = editableString(patch.videoPrompt, currentShot.videoPrompt || "");
+  }
+  return {
+    ...next,
+    id: currentShot.id,
+    order: currentShot.order,
+    durationSec: 15,
+    assetRefs: Array.isArray(currentShot.assetRefs) ? currentShot.assetRefs : []
+  };
+}
+
+function isPromptPackageStale(pack = {}) {
+  return pack.stale === true || Boolean(pack.staleReason);
+}
+
 async function savePromptPackageEdits(payload = {}) {
   const packageId = stringOr(payload.packageId || payload.id, "");
   if (!packageId) {
@@ -1103,6 +1190,10 @@ async function doGenerateVideos(payload = {}) {
     : (episode.promptPackages || []);
   if (!packages.length) {
     throw new Error("没有可提交的视频提示词包");
+  }
+  const stalePackages = packages.filter(isPromptPackageStale);
+  if (stalePackages.length) {
+    throw new Error(`分镜脚本已更新，请先重新生成提示词包：${stalePackages.map((pack) => pack.shotId || pack.id).join(", ")}`);
   }
 
   const adapter = resolveModelAdapter(config, "videoModel");
@@ -1476,29 +1567,66 @@ function buildSeedanceVideoPrompt(config, pack = {}, shot = {}, assets = [], ass
   const dialogue = pack.dialogue || [];
   const subShots = pack.subShots || [];
   const style = activeProjectStyle(config.project || {});
-  const assetBlock = references.length ? `指定参考资产：\n${references.map((asset, index) => {
-    const label = `${index + 1}. @${asset.id} ${asset.name || ""}`.trim();
-    const type = asset.type ? `，${asset.type}` : "";
-    const image = asset.imageUrl ? `，reference_image: ${asset.imageUrl}` : "";
-    return `${label}${type}${image}`;
-  }).join("\n")}` : "";
   return [
-    pack.seedancePrompt || buildSeedancePromptFromPackage(pack, shot, assets, assetImages),
+    "Seedance 2.0 视频生成提示词。请结合 image_urls 参考图生成连续视频，不要生成故事板图或首帧图。",
+    buildSeedanceReferenceBindingBlock(references),
     style.prompt ? `项目统一风格：${style.prompt}` : "",
-    assetBlock,
+    buildSeedanceSubmissionSubShotBlock(pack, shot),
     pack.soundDesign ? `分镜音效：\n${pack.soundDesign}` : "",
     audio.length ? `音效时间轴：\n${audio.map((row) => `${row.timeRange || ""} ${row.content || ""}${row.assetRefs?.length ? ` 关联资产：${row.assetRefs.map((id) => `@${id}`).join(" ")}` : ""}`.trim()).join("\n")}` : "",
     dialogue.length ? `分镜台词：\n${dialogue.map((row) => `${row.timeRange || ""} ${row.speakerAssetId ? `@${row.speakerAssetId}` : ""}${row.voice ? ` ${row.voice}` : ""}: ${row.text || ""}`.trim()).join("\n")}` : "",
-    subShots.length ? `分镜提示词：\n${subShots.map((subShot) => [
+    "要求：严格保持参考图中的角色身份、场景布局、道具外观和项目风格；不要根据未绑定的文字描述重塑角色外观；不要新增未指定角色；不要生成字幕水印。"
+  ].filter(Boolean).join("\n\n");
+}
+
+function buildSeedanceReferenceBindingBlock(references = []) {
+  const imageReferences = (references || []).filter((asset) => asset.imageUrl);
+  if (!imageReferences.length) {
+    return "";
+  }
+  return `参考图绑定（顺序与 image_urls 完全一致）：\n${imageReferences.map((asset, index) => {
+    const label = `image_urls[${index}] = @${asset.id} ${asset.name || ""}`.trim();
+    const type = asset.type ? `，${asset.type}` : "";
+    return `${index + 1}. ${label}${type}。${seedanceReferenceBindingRule(asset)}`;
+  }).join("\n")}`;
+}
+
+function seedanceReferenceBindingRule(asset = {}) {
+  const type = String(asset.type || "").toLowerCase();
+  if (type === "character") {
+    return "这是角色身份参考图；角色出镜时必须以该图作为外观主锚点，保持脸型、发型、服装、身体比例、颜色和材质，不要被动作、光效或场景风格重塑。";
+  }
+  if (type === "location") {
+    return "这是场景/空间布局参考图；保持空间结构、地标位置、家具/环境关系、材质和整体氛围，不要把场景图当作角色外观参考。";
+  }
+  if (type === "prop") {
+    return "这是道具外观参考图；保持道具形状、颜色、材质、尺寸关系和关键识别点，不要把道具图当作角色或场景参考。";
+  }
+  return "这是视觉参考图；仅用于对应 @资产 的外观一致性，不要混用到其他资产。";
+}
+
+function buildSeedanceSubmissionSubShotBlock(pack = {}, shot = {}) {
+  const subShots = Array.isArray(pack.subShots) ? pack.subShots : [];
+  if (subShots.length) {
+    return `分镜提示词（仅按以下时间段生成视频画面）：\n${subShots.map((subShot) => [
       subShot.timeRange ? `[${subShot.timeRange}]` : "",
       subShot.cameraLanguage || "",
       subShot.blocking || "",
       subShot.composition || "",
       subShot.action || "",
       subShot.assetRefs?.length ? `参考资产：${subShot.assetRefs.map((id) => `@${id}`).join(" ")}` : ""
-    ].filter(Boolean).join("；")).join("\n")}` : "",
-    "要求：严格保持项目风格、角色身份、场景布局、道具外观一致；不要新增未指定角色；不要生成字幕水印。"
-  ].filter(Boolean).join("\n\n");
+    ].filter(Boolean).join("；")).join("\n")}`;
+  }
+  if (pack.seedancePrompt) {
+    return `分镜提示词：\n${pack.seedancePrompt}`;
+  }
+  const fallback = [
+    shot.camera || "",
+    shot.action || "",
+    shot.dialogue ? `台词：${shot.dialogue}` : "",
+    shot.continuity ? `衔接：${shot.continuity}` : ""
+  ].filter(Boolean).join("；");
+  return fallback ? `分镜提示词：\n${fallback}` : "";
 }
 
 async function prepareSeedanceReferenceImages(adapter, pack = {}, assets = [], assetImages = []) {
