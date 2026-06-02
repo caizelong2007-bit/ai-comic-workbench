@@ -48,6 +48,7 @@ let videoTaskPollTimer = null;
 let videoTaskPollInFlight = false;
 let pendingDelete = null;
 let promptEditor = null;
+let shotEditor = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -111,6 +112,13 @@ function bindElements() {
     "promptDetailCopyBtn",
     "promptDetailExportBtn",
     "promptDetailUseBtn",
+    "shotEditorModal",
+    "shotEditorForm",
+    "closeShotEditorBtn",
+    "cancelShotEditorBtn",
+    "saveShotEditorBtn",
+    "shotEditorTitle",
+    "shotEditorMeta",
     "eventsModal",
     "closeEventsModalBtn",
     "eventsRefreshBtn",
@@ -238,6 +246,12 @@ function bindEvents() {
   els.promptDetailCopyBtn.addEventListener("click", () => copyPromptPackage(els.promptDetailCopyBtn.dataset.copyPrompt));
   els.promptDetailExportBtn.addEventListener("click", () => exportPromptPackage(els.promptDetailExportBtn.dataset.exportPrompt));
   els.promptDetailUseBtn.addEventListener("click", savePromptPackageEdits);
+  els.closeShotEditorBtn.addEventListener("click", closeShotEditorModal);
+  els.cancelShotEditorBtn.addEventListener("click", closeShotEditorModal);
+  els.shotEditorModal.addEventListener("click", (event) => {
+    if (event.target === els.shotEditorModal) closeShotEditorModal();
+  });
+  els.shotEditorForm.addEventListener("submit", saveShotEditorEdits);
   els.assetForm.addEventListener("submit", saveManualAsset);
   els.assetImageFileInput.addEventListener("change", loadAssetImageFile);
   els.saveStoryBtn.addEventListener("click", saveStoryScript);
@@ -294,6 +308,11 @@ function bindEvents() {
   });
 
   els.shotsOutput.addEventListener("click", (event) => {
+    const editShotButton = event.target.closest("[data-edit-shot]");
+    if (editShotButton) {
+      openShotEditorModal(editShotButton.dataset.editShot);
+      return;
+    }
     const viewPromptButton = event.target.closest("[data-view-prompt]");
     if (viewPromptButton) {
       openPromptDetailModal(viewPromptButton.dataset.viewPrompt);
@@ -1045,6 +1064,69 @@ function closePromptDetailModal() {
   els.promptDetailCopyBtn.dataset.copyPrompt = "";
   els.promptDetailExportBtn.dataset.exportPrompt = "";
   promptEditor = null;
+}
+
+function openShotEditorModal(shotId) {
+  const episode = getActiveEpisode();
+  const shot = (episode?.shots || []).find((item) => item.id === shotId);
+  if (!shot) {
+    toast("没有找到分镜脚本");
+    return;
+  }
+  shotEditor = {
+    episodeId: episode.id,
+    shotId: shot.id
+  };
+  const form = els.shotEditorForm;
+  form.elements.sceneId.value = shot.sceneId || "";
+  form.elements.shotType.value = shot.shotType || "";
+  form.elements.camera.value = shot.camera || "";
+  form.elements.action.value = shot.action || "";
+  form.elements.dialogue.value = shot.dialogue || "";
+  form.elements.assetNotes.value = shot.assetNotes || "";
+  form.elements.visualNotes.value = shot.visualNotes || "";
+  form.elements.continuity.value = shot.continuity || "";
+  els.shotEditorTitle.textContent = `编辑分镜脚本 ${shot.id}`;
+  els.shotEditorMeta.textContent = `${shot.durationSec || 15}s / ${shot.sceneId || "未指定场景"}`;
+  els.shotEditorModal.classList.remove("is-hidden");
+  form.elements.camera.focus();
+}
+
+function closeShotEditorModal() {
+  els.shotEditorModal.classList.add("is-hidden");
+  els.shotEditorForm.reset();
+  shotEditor = null;
+}
+
+async function saveShotEditorEdits(event) {
+  event.preventDefault();
+  if (!shotEditor?.shotId) return;
+  const formData = new FormData(els.shotEditorForm);
+  const shot = {
+    sceneId: String(formData.get("sceneId") || "").trim(),
+    shotType: String(formData.get("shotType") || "").trim(),
+    camera: String(formData.get("camera") || "").trim(),
+    action: String(formData.get("action") || "").trim(),
+    dialogue: String(formData.get("dialogue") || "").trim(),
+    assetNotes: String(formData.get("assetNotes") || "").trim(),
+    visualNotes: String(formData.get("visualNotes") || "").trim(),
+    continuity: String(formData.get("continuity") || "").trim()
+  };
+  if (!shot.camera || !shot.action) {
+    toast("请至少填写运镜和画面动作");
+    return;
+  }
+  await withBusy(`shot:save:${shotEditor.shotId}`, async () => {
+    const data = await api.post("/api/shots/save", {
+      episodeId: shotEditor.episodeId,
+      shotId: shotEditor.shotId,
+      shot
+    });
+    applyServerData(data);
+    closeShotEditorModal();
+    render();
+    toast("分镜脚本已保存，相关提示词和视频需要重新确认");
+  }, "保存分镜失败");
 }
 
 function openEventsModal() {
@@ -2150,15 +2232,79 @@ function buildSubShotSeedanceText(subShot = {}, assets = []) {
   ].filter(Boolean).join("\n");
 }
 
+function activeProjectStyleForSeedancePrompt(project = {}) {
+  const styles = projectStyleOptions(project);
+  const active = styles.find((style) => style.id && style.id === project.activeStyleId)
+    || styles.find((style) => style.prompt && style.prompt === project.visualStyle)
+    || null;
+  return {
+    id: active?.id || project.activeStyleId || "",
+    name: active?.name || "",
+    imageUrl: active?.imageUrl || active?.referenceImage || "",
+    prompt: active?.prompt || project.visualStyle || ""
+  };
+}
+
+function buildSeedanceReferenceBindingBlockForClient(assets = []) {
+  const imageReferences = uniqueAssets(assets).filter((asset) => asset.imageUrl).slice(0, 6);
+  if (!imageReferences.length) return "";
+  return `参考图绑定（顺序与 image_urls 完全一致）：\n${imageReferences.map((asset, index) => {
+    const label = `image_urls[${index}] = @${asset.id} ${asset.name || ""}`.trim();
+    const type = asset.type ? `，${normalizeAssetType(asset.type)}` : "";
+    return `${index + 1}. ${label}${type}。${seedanceReferenceBindingRuleForClient(asset)}`;
+  }).join("\n")}`;
+}
+
+function seedanceReferenceBindingRuleForClient(asset = {}) {
+  const type = normalizeAssetType(asset.type);
+  if (type === "character") {
+    return "这是角色身份参考图；角色出镜时必须以该图作为外观主锚点，保持脸型、发型、服装、身体比例、颜色和材质，不要被动作、光效或场景风格重塑。";
+  }
+  if (type === "location") {
+    return "这是场景/空间布局参考图；保持空间结构、地标位置、家具/环境关系、材质和整体氛围，不要把场景图当作角色外观参考。";
+  }
+  if (type === "prop") {
+    return "这是道具外观参考图；保持道具形状、颜色、材质、尺寸关系和关键识别点，不要把道具图当作角色或场景参考。";
+  }
+  return "这是视觉参考图；仅用于对应 @资产 的外观一致性，不要混用到其他资产。";
+}
+
+function buildSeedanceSubmissionSubShotBlockForClient(pack = {}, shot = {}, subShots = []) {
+  const rows = Array.isArray(subShots) ? subShots : [];
+  if (rows.length) {
+    return `分镜提示词（仅按以下时间段生成视频画面）：\n${rows.map((subShot) => [
+      subShot.timeRange ? `[${subShot.timeRange}]` : "",
+      subShot.cameraLanguage || "",
+      subShot.blocking || "",
+      subShot.composition || "",
+      subShot.action || "",
+      subShot.assetRefs?.length ? `参考资产：${subShot.assetRefs.map((id) => `@${id}`).join(" ")}` : ""
+    ].filter(Boolean).join("；")).join("\n")}`;
+  }
+  if (pack.seedancePrompt) {
+    return `分镜提示词：\n${pack.seedancePrompt}`;
+  }
+  const fallback = [
+    shot.camera || "",
+    shot.action || "",
+    shot.dialogue ? `台词：${shot.dialogue}` : "",
+    shot.continuity ? `衔接：${shot.continuity}` : ""
+  ].filter(Boolean).join("；");
+  return fallback ? `分镜提示词：\n${fallback}` : "";
+}
+
 function buildFinalSeedancePrompt(pack = {}, shot = {}, assets = [], audio = [], dialogue = [], subShots = []) {
+  const style = activeProjectStyleForSeedancePrompt(current.config?.project || {});
   return [
-    pack.seedancePrompt || buildSeedancePreview(shot, assets),
-    assets.length ? `\n指定参考资产：\n${assets.map((asset, index) => `${index + 1}. @${asset.id} ${asset.name}（${asset.typeLabel || assetTypeLabel(asset.type)}）${asset.imageUrl ? ` reference_image: ${asset.imageUrl}` : " reference_image: 未生成"}`).join("\n")}` : "",
-    pack.soundDesign ? `\n分镜音效：\n${pack.soundDesign}` : "",
-    audio.length ? `\n音效时间轴：\n${audio.map((row) => `${row.timeRange} ${row.content}${row.assetRefs?.length ? ` ｜资产：${row.assetRefs.map((id) => `@${id}`).join(" ")}` : ""}`).join("\n")}` : "",
-    dialogue.length ? `\n分镜台词：\n${dialogue.map((row) => `${row.timeRange} ${row.speaker ? `@${row.speaker}` : ""}${row.voice ? `（${row.voice}）` : ""}：${row.text}`).join("\n")}` : "",
-    subShots.length ? `\n分镜提示词：\n${subShots.map((subShot) => subShot.seedanceText).join("\n\n")}` : ""
-  ].filter(Boolean).join("\n");
+    "Seedance 2.0 视频生成提示词。请结合 image_urls 参考图生成连续视频，不要生成故事板图或首帧图。",
+    buildSeedanceReferenceBindingBlockForClient(assets),
+    style.prompt ? `项目统一风格：${style.prompt}` : "",
+    buildSeedanceSubmissionSubShotBlockForClient(pack, shot, subShots),
+    pack.soundDesign ? `分镜音效：\n${pack.soundDesign}` : "",
+    audio.length ? `音效时间轴：\n${audio.map((row) => `${row.timeRange || ""} ${row.content || ""}${row.assetRefs?.length ? ` 关联资产：${row.assetRefs.map((id) => `@${id}`).join(" ")}` : ""}`.trim()).join("\n")}` : "",
+    dialogue.length ? `分镜台词：\n${dialogue.map((row) => `${row.timeRange || ""} ${row.speakerAssetId ? `@${row.speakerAssetId}` : row.speaker ? `@${row.speaker}` : ""}${row.voice ? ` ${row.voice}` : ""}: ${row.text || ""}`.trim()).join("\n")}` : "",
+    "要求：严格保持参考图中的角色身份、场景布局、道具外观和项目风格；不要根据未绑定的文字描述重塑角色外观；不要新增未指定角色；不要生成字幕水印。"
+  ].filter(Boolean).join("\n\n");
 }
 
 function downloadJson(payload, fileName) {
@@ -2785,11 +2931,9 @@ function renderShots(shots, packages) {
         <section class="shot-cell shot-script-cell">
           <span class="shot-ribbon">${escapeHtml(shot.id || "镜头")}</span>
           <div class="shot-cell-actions">
-            <button type="button" aria-label="添加">＋</button>
-            <button type="button" aria-label="删除">－</button>
-            <button type="button" aria-label="编辑">✎</button>
+            <button type="button" aria-label="编辑分镜脚本" title="编辑分镜脚本" data-edit-shot="${escapeAttr(shot.id)}">✎</button>
           </div>
-          <p>${escapeHtml(formatShotScript(shot))}</p>
+          ${renderShotScriptPreview(shot)}
         </section>
         <section class="shot-cell shot-asset-cell">
           ${assetsRunning ? `<div class="cell-loading"><span class="spinner"></span><strong>正在提取资产</strong></div>` : ""}
@@ -2819,11 +2963,12 @@ function renderShotVideoPanel(shot = {}, pack = null, video = {}) {
   const shotId = shot.id || pack?.shotId || "";
   const jobKey = `video-clip:${shotId}`;
   const running = isJobRunning(jobKey);
+  const promptStale = promptPackageIsStale(pack);
   const stale = videoIsStale(video, pack);
   const status = video.status || (video.taskId ? "submitted" : "not-started");
   const pending = video.taskId && !["completed", "failed", "cancelled"].includes(String(status).toLowerCase());
-  const locked = !pack || running || relatedJobRunning(jobKey);
-  const buttonText = running ? "提交中..." : stale ? "按新提示重新生成" : video.taskId ? "重新生成" : "生成视频";
+  const locked = !pack || promptStale || running || relatedJobRunning(jobKey);
+  const buttonText = running ? "提交中..." : promptStale ? "先重新生成提示词" : stale ? "按新提示重新生成" : video.taskId ? "重新生成" : "生成视频";
   const panel = video.url
     ? `<video class="shot-video-preview" src="${escapeAttr(video.url)}" controls preload="metadata"></video>`
     : video.thumbnailUrl
@@ -2833,6 +2978,7 @@ function renderShotVideoPanel(shot = {}, pack = null, video = {}) {
     ${panel}
     <div class="shot-video-meta">
       <span class="video-status ${escapeAttr(stale ? "stale" : videoStatusTone(status))}">${escapeHtml(stale ? "提示词已更新" : videoStatusText(status))}${!stale && video.progress != null ? ` ${escapeHtml(video.progress)}%` : ""}</span>
+      ${promptStale ? `<small class="warning-text">分镜脚本已更新，请先重新生成 Seedance 提示词。</small>` : ""}
       ${stale ? `<small class="warning-text">当前视频早于最新提示词包，请重新生成视频。</small>` : ""}
       ${video.taskId ? `<small>${escapeHtml(video.taskId)}</small>` : ""}
       ${video.adapterError ? `<small class="error-box">${escapeHtml(video.adapterError)}</small>` : ""}
@@ -2842,6 +2988,10 @@ function renderShotVideoPanel(shot = {}, pack = null, video = {}) {
       ${pending ? `<button class="pipeline-action secondary-action" type="button" data-refresh-video-task>刷新</button>` : ""}
     </div>
   `;
+}
+
+function promptPackageIsStale(pack = {}) {
+  return pack?.stale === true || Boolean(pack?.staleReason);
 }
 
 function videoIsStale(video = {}, pack = null) {
@@ -2894,6 +3044,23 @@ function formatShotScript(shot = {}) {
     shot.dialogue ? `台词：${shot.dialogue}` : "",
     shot.continuity ? `衔接：${shot.continuity}` : ""
   ].filter(Boolean).join("｜");
+}
+
+function renderShotScriptPreview(shot = {}) {
+  const heading = [
+    `[${shot.durationSec || 15}s]`,
+    shot.sceneId ? `场景 ${shot.sceneId}` : "",
+    shot.shotType || ""
+  ].filter(Boolean).join(" ");
+  return `
+    <div class="shot-script-preview">
+      <h3>${escapeHtml(heading || shot.id || "分镜")}</h3>
+      ${shot.camera ? `<p><b>运镜</b>${escapeHtml(clipText(shot.camera, 92))}</p>` : ""}
+      ${shot.action ? `<p><b>画面</b>${escapeHtml(clipText(shot.action, 118))}</p>` : ""}
+      ${shot.dialogue ? `<p><b>台词</b>${escapeHtml(clipText(shot.dialogue, 72))}</p>` : ""}
+      ${shot.continuity ? `<p><b>衔接</b>${escapeHtml(clipText(shot.continuity, 72))}</p>` : ""}
+    </div>
+  `;
 }
 
 function inferShotAssets(shot = {}, assets = []) {
@@ -2957,6 +3124,7 @@ function normalizeShotAssetTab(type) {
 
 function renderPromptSummary(pack, shot, assets = []) {
   const refs = promptPackageReferenceAssets(pack);
+  const stale = promptPackageIsStale(pack);
   const summary = [
     pack.soundDesign ? `音效：${pack.soundDesign}` : "",
     (pack.dialogue || []).length ? `台词：${pack.dialogue.map((row) => `${row.speakerAssetId || "角色"}：${row.text}`).join(" / ")}` : "",
@@ -2967,8 +3135,10 @@ function renderPromptSummary(pack, shot, assets = []) {
       <div class="prompt-summary-top">
         <span class="tag">${escapeHtml(pack.durationSec || 15)}s</span>
         <span class="tag">${escapeHtml(pack.source || "local")}</span>
+        ${stale ? `<span class="tag warning-tag">分镜已更新</span>` : ""}
         <strong>${escapeHtml(pack.title || `${pack.shotId} 提示词`)}</strong>
       </div>
+      ${stale ? `<small class="prompt-summary-warning">当前提示词早于最新分镜脚本，建议重新生成。</small>` : ""}
       <p>${escapeHtml(clipText(summary, 190))}</p>
       ${renderAssetMentions(refs)}
     </div>
@@ -3320,9 +3490,12 @@ function renderVideos(packages, shots) {
 
 function renderVideoClipCard(pack = {}, shot = {}, video = {}) {
   const status = video.status || (video.taskId ? "submitted" : "not-started");
+  const promptStale = promptPackageIsStale(pack);
   const stale = videoIsStale(video, pack);
   const pending = video.taskId && !["completed", "failed", "cancelled"].includes(String(status).toLowerCase());
   const jobKey = `video-clip:${pack.shotId || shot.id || pack.id}`;
+  const disabled = promptStale || isJobRunning(jobKey);
+  const buttonText = isJobRunning(jobKey) ? "提交中..." : promptStale ? "先重新生成提示词" : stale ? "按新提示重新提交" : video.taskId ? "重新提交" : "生成此片段";
   const refs = video.referenceImages?.length ? video.referenceImages : (pack.assetReferences || []).map((asset) => ({
     id: asset.id,
     name: asset.name,
@@ -3343,12 +3516,13 @@ function renderVideoClipCard(pack = {}, shot = {}, video = {}) {
           <span class="video-status ${escapeAttr(stale ? "stale" : videoStatusTone(status))}">${escapeHtml(stale ? "提示词已更新" : videoStatusText(status))}${!stale && video.progress != null ? ` ${escapeHtml(video.progress)}%` : ""}</span>
         </div>
         <p>${escapeHtml(clipText(video.prompt || pack.seedancePrompt || shot.action || "", 220))}</p>
+        ${promptStale ? `<p class="warning-text">分镜脚本已更新，请先回到分镜制作重新生成 Seedance 提示词。</p>` : ""}
         ${stale ? `<p class="warning-text">当前视频早于最新提示词包，请重新生成视频。</p>` : ""}
         ${video.taskId ? `<small class="task-id">task_id: ${escapeHtml(video.taskId)}</small>` : ""}
         ${video.adapterError ? `<p class="error-box">${escapeHtml(video.adapterError)}</p>` : ""}
         ${refs.length ? `<div class="video-ref-strip">${refs.map((asset) => `<span>${asset.url ? `<img src="${escapeAttr(asset.url)}" alt="${escapeAttr(asset.name || asset.id)}">` : ""}<b>@${escapeHtml(asset.id || "")}</b>${escapeHtml(asset.name || "")}</span>`).join("")}</div>` : ""}
         <div class="button-row prompt-export-row">
-          <button type="button" data-generate-video-clip="${escapeAttr(pack.shotId || shot.id || "")}" data-job-key="${escapeAttr(jobKey)}" data-idle-text="${stale ? "按新提示重新提交" : video.taskId ? "重新提交" : "生成此片段"}" data-loading-text="提交中...">${isJobRunning(jobKey) ? "提交中..." : stale ? "按新提示重新提交" : video.taskId ? "重新提交" : "生成此片段"}</button>
+          <button type="button" data-generate-video-clip="${escapeAttr(pack.shotId || shot.id || "")}" data-job-key="${escapeAttr(jobKey)}" data-idle-text="${escapeAttr(buttonText)}" data-loading-text="提交中..." ${disabled ? "disabled" : ""}>${escapeHtml(buttonText)}</button>
           ${pending ? `<button type="button" data-refresh-video-task>刷新状态</button>` : ""}
           <button type="button" data-copy-prompt="${escapeAttr(pack.id || "")}">复制提示词包</button>
         </div>
