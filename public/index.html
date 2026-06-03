@@ -267,12 +267,17 @@
                 <p class="eyebrow">Episode Script</p>
                 <h3 id="currentEpisodeTitle">分集剧本</h3>
               </div>
-              <button id="saveEpisodeScriptBtn" class="primary">保存分集剧本</button>
+              <div class="button-row">
+                <button id="saveEpisodeBriefBtn" type="button">保存意图</button>
+                <button id="structureEpisodeScriptBtn" class="primary" type="button">生成/完善剧本</button>
+              </div>
             </div>
             <label class="script-editor">
-              <span>当前剧集剧本</span>
-              <textarea id="episodeScriptInput" rows="15" placeholder="填写本集剧情。若留空，生成分镜时会临时继承项目剧本。"></textarea>
+              <span>本集故事意图</span>
+              <textarea id="episodeScriptInput" rows="9" placeholder="可选。写清本集想讲什么、必须保留的桥段/角色/道具/结尾。不填写时，AI 会根据总剧本和上一集自动续写。"></textarea>
             </label>
+            <p class="muted-text">人工负责方向，AI 负责扩写、容量控制和结构化。生成分镜仍沿用下方结构化剧本。</p>
+            <div id="episodeScriptStatus" class="episode-script-status"></div>
             <div id="inheritedAttrs" class="attribute-strip"></div>
           </article>
           <article class="panel-card">
@@ -361,28 +366,14 @@
       <button id="closeCreateEpisodeBtn" class="modal-close" aria-label="关闭">×</button>
       <h2 id="createEpisodeTitle">添加剧集</h2>
       <form id="createEpisodeForm" class="create-episode-form">
-        <div class="episode-mode-grid" role="radiogroup" aria-label="剧集创建方式">
-          <label class="mode-choice">
-            <input type="radio" name="generateMode" value="llm" checked>
-            <span><strong>LLM 续写生成</strong><small>根据项目剧本和上一集内容自动生成本集剧本</small></span>
-          </label>
-          <label class="mode-choice">
-            <input type="radio" name="generateMode" value="manual">
-            <span><strong>手动输入</strong><small>直接粘贴本集剧情，保存为本集剧本</small></span>
-          </label>
-          <label class="mode-choice">
-            <input type="radio" name="generateMode" value="blank">
-            <span><strong>空白剧集</strong><small>先创建剧集，后续再填写或生成</small></span>
-          </label>
-        </div>
         <label>
-          <span>本集剧情目标 / 备注</span>
-          <textarea id="episodeCreateNote" rows="5" placeholder="可选。比如：本集让主角发现世界杯奖杯线索，并在结尾遇到新的对手。手动输入模式下这里就是本集剧本。"></textarea>
+          <span>本集故事意图（可选）</span>
+          <textarea id="episodeCreateNote" rows="5" placeholder="可以留空。填写后会保存为本集意图；不填写时，后续点击“生成/完善剧本”会根据项目总剧本和上一集自动续写。"></textarea>
         </label>
-        <small id="episodeCreateHint">分集标题和时长会自动继承项目设置；第 2 集以后会参考上一集结尾续写。</small>
+        <small id="episodeCreateHint">新建剧集只创建空白剧集，不会立即调用 LLM；请在分集剧本页点击“生成/完善剧本”。</small>
         <div class="modal-actions">
           <button id="cancelCreateEpisodeBtn" type="button">取消</button>
-          <button id="createEpisodeSubmitBtn" class="primary" type="submit">创建并生成</button>
+          <button id="createEpisodeSubmitBtn" class="primary" type="submit">创建剧集</button>
         </div>
       </form>
     </div>

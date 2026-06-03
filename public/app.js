@@ -130,6 +130,8 @@ function bindElements() {
     "saveStoryBtn",
     "saveConfigBtn",
     "saveEpisodeScriptBtn",
+    "saveEpisodeBriefBtn",
+    "structureEpisodeScriptBtn",
     "toAttrsBtn",
     "toAssetsBtn",
     "finishProjectSetupBtn",
@@ -143,6 +145,7 @@ function bindElements() {
     "addStyleBtn",
     "projectScriptInput",
     "episodeScriptInput",
+    "episodeScriptStatus",
     "currentEpisodeTitle",
     "inheritedAttrs",
     "genScriptBtn",
@@ -196,7 +199,6 @@ function bindEvents() {
     if (event.target === els.createEpisodeModal) closeCreateEpisodeModal();
   });
   els.createEpisodeForm.addEventListener("submit", createEpisodeFromForm);
-  els.createEpisodeForm.addEventListener("change", updateCreateEpisodeMode);
   els.closeConfirmDeleteBtn.addEventListener("click", closeConfirmDeleteModal);
   els.cancelConfirmDeleteBtn.addEventListener("click", closeConfirmDeleteModal);
   els.confirmDeleteBtn.addEventListener("click", confirmPendingDelete);
@@ -262,7 +264,9 @@ function bindEvents() {
   document.querySelectorAll("[data-open-model-settings]").forEach((button) => {
     button.addEventListener("click", openModelSettings);
   });
-  els.saveEpisodeScriptBtn.addEventListener("click", saveEpisodeScript);
+  if (els.saveEpisodeScriptBtn) els.saveEpisodeScriptBtn.addEventListener("click", saveEpisodeScript);
+  els.saveEpisodeBriefBtn.addEventListener("click", saveEpisodeBrief);
+  els.structureEpisodeScriptBtn.addEventListener("click", structureEpisodeScript);
   els.toAttrsBtn.addEventListener("click", goToProjectAttrs);
   els.toAssetsBtn.addEventListener("click", goToProjectAssets);
   els.finishProjectSetupBtn.addEventListener("click", finishProjectSetup);
@@ -646,6 +650,9 @@ function clientJobKeyFromServer(job = {}) {
   if (String(job.scopeId || "").startsWith("shot-assets:")) {
     return packageAssetsJobKey(String(job.scopeId).replace(/^shot-assets:/, ""));
   }
+  if (job.type === "episode-script") {
+    return `episode-script:${job.scopeId || "global"}`;
+  }
   if (job.type === "prompt-package") {
     const scopeId = String(job.scopeId || "");
     const parts = scopeId.split(":").filter(Boolean);
@@ -721,22 +728,16 @@ function setStudioMode(mode) {
 }
 
 async function addEpisode() {
-  return createEpisodeFromOptions({ generateMode: "blank", note: "" });
+  return createEpisodeFromOptions({ brief: "" });
 }
 
 async function createEpisodeFromForm(event) {
   event.preventDefault();
-  const formData = new FormData(els.createEpisodeForm);
-  const generateMode = String(formData.get("generateMode") || "llm");
-  const note = els.episodeCreateNote.value.trim();
-  if (generateMode === "manual" && !note) {
-    toast("手动输入模式请填写本集剧情，或选择空白剧集");
-    return;
-  }
-  await createEpisodeFromOptions({ generateMode, note });
+  const brief = els.episodeCreateNote.value.trim();
+  await createEpisodeFromOptions({ brief });
 }
 
-async function createEpisodeFromOptions({ generateMode = "blank", note = "" } = {}) {
+async function createEpisodeFromOptions({ brief = "" } = {}) {
   if (!projectSetupComplete()) {
     toast("请先完成项目剧本、项目属性和项目资产");
     showProjectSettings();
@@ -747,20 +748,15 @@ async function createEpisodeFromOptions({ generateMode = "blank", note = "" } = 
     await saveCurrentConfig();
     const body = {
       title: `第 ${nextIndex} 集`,
-      generateMode
+      brief
     };
-    if (generateMode === "manual") {
-      body.scriptText = note;
-    } else if (generateMode === "llm") {
-      body.note = note;
-    }
     const data = await api.post("/api/episodes", body);
     applyServerData(data);
     closeCreateEpisodeModal();
     render();
     setStudioMode("episodes");
     setActiveView("episode-script");
-    toast(generateMode === "llm" ? `已生成第 ${nextIndex} 集剧本${sourceSuffix(data)}` : `已添加第 ${nextIndex} 集`);
+    toast(`已添加第 ${nextIndex} 集${brief ? "，故事意图已保存" : ""}`);
   }, "添加剧集失败");
 }
 
@@ -947,35 +943,15 @@ function openCreateEpisodeModal() {
     return;
   }
   els.createEpisodeForm.reset();
-  const modeInput = els.createEpisodeForm.elements.generateMode;
-  if (modeInput) modeInput.value = "llm";
-  updateCreateEpisodeMode();
+  els.createEpisodeSubmitBtn.textContent = "创建剧集";
+  els.episodeCreateNote.placeholder = "可以留空。填写后会保存为本集意图；不填写时，后续点击“生成/完善剧本”会根据项目总剧本和上一集自动续写。";
+  els.episodeCreateHint.textContent = "新建剧集只创建空白剧集，不会立即调用 LLM；请在分集剧本页点击“生成/完善剧本”。";
   els.createEpisodeModal.classList.remove("is-hidden");
   els.episodeCreateNote.focus();
 }
 
 function closeCreateEpisodeModal() {
   els.createEpisodeModal.classList.add("is-hidden");
-}
-
-function updateCreateEpisodeMode() {
-  const mode = selectedCreateEpisodeMode();
-  els.createEpisodeSubmitBtn.textContent = mode === "llm" ? "创建并生成" : "创建剧集";
-  els.episodeCreateNote.placeholder = mode === "manual"
-    ? "粘贴或填写本集完整剧情。保存后会作为本集剧本，后续分镜会优先使用它。"
-    : mode === "blank"
-      ? "可选。先留空创建剧集，后续可在分集剧本页填写。"
-      : "可选。比如：本集让主角发现世界杯奖杯线索，并在结尾遇到新的对手。";
-  els.episodeCreateHint.textContent = mode === "llm"
-    ? "分集标题和时长会自动继承项目设置；第 2 集以后会参考上一集结尾续写。"
-    : mode === "manual"
-      ? "分集标题和时长自动继承项目设置；手动内容不会再调用 LLM。"
-      : "将创建空白剧集；若不填写本集剧本，生成分镜时会临时使用项目剧本。";
-}
-
-function selectedCreateEpisodeMode() {
-  const data = new FormData(els.createEpisodeForm);
-  return String(data.get("generateMode") || "llm");
 }
 
 function openStyleModal(styleId = "") {
@@ -1714,6 +1690,49 @@ async function saveEpisodeScript() {
   }, "保存分集剧本失败");
 }
 
+async function saveEpisodeBrief(options = {}) {
+  const episode = getActiveEpisode();
+  if (!episode) {
+    toast("请先创建剧集");
+    return false;
+  }
+  const brief = els.episodeScriptInput.value.trim();
+  return withBusy("episode:brief:save", async () => {
+    await saveCurrentConfig();
+    const data = await api.post("/api/episodes/brief", {
+      episodeId: episode.id,
+      brief
+    });
+    applyServerData(data);
+    render();
+    if (!options.silent) toast(`${episode.title} 故事意图已保存`);
+  }, "保存故事意图失败");
+}
+
+async function structureEpisodeScript() {
+  const episode = getActiveEpisode();
+  if (!episode) {
+    toast("请先创建剧集");
+    return false;
+  }
+  const brief = els.episodeScriptInput.value.trim();
+  const key = episodeScriptJobKey(episode.id);
+  return withBusy(key, async () => {
+    await saveCurrentConfig();
+    const data = await api.post("/api/episodes/structure-script", {
+      episodeId: episode.id,
+      brief
+    });
+    applyServerData(data);
+    render();
+    if (data.duplicate) {
+      toast(`${episode.title} 剧本正在生成/完善中，请稍后刷新查看`);
+      return "keep-running";
+    }
+    toast(`${episode.title} 剧本已生成/完善${sourceSuffix(data)}`);
+  }, "生成/完善分集剧本失败");
+}
+
 async function runStage(stage) {
   const path = {
     script: "/api/generate/script",
@@ -2396,7 +2415,7 @@ async function withBusy(keyOrTask, taskOrFailPrefix, maybeFailPrefix) {
 }
 
 function shouldPersistJobError(key = "") {
-  return key.startsWith("prompt-package:") && !key.startsWith("prompt-package:legacy:");
+  return (key.startsWith("prompt-package:") && !key.startsWith("prompt-package:legacy:")) || key.startsWith("episode-script:");
 }
 
 function setJob(key, status, label = "", detail = {}) {
@@ -2449,6 +2468,10 @@ function stageJobKey(stage) {
   }[stage] || `generate:${stage}`;
 }
 
+function episodeScriptJobKey(episodeId = getActiveEpisode()?.id) {
+  return `episode-script:episode-script:${episodeId || "global"}`;
+}
+
 function assetJobKey(assetId) {
   return `asset-image:${assetId}`;
 }
@@ -2475,8 +2498,12 @@ function relatedJobRunning(key) {
   const shotsGenerating = isJobRunning(stageJobKey("shots"));
   const assetsGenerating = isJobRunning(stageJobKey("images"));
   const cardsGenerating = isJobRunning(stageJobKey("cards"));
+  const scriptStructuring = isJobRunning(episodeScriptJobKey());
+  if (key.startsWith("episode-script:")) {
+    return episodeGenerating || shotsGenerating || promptGenerating;
+  }
   if (key.startsWith("prompt-package:")) {
-    return promptGenerating || episodeGenerating;
+    return promptGenerating || episodeGenerating || scriptStructuring;
   }
   if (key.startsWith("asset-image:")) {
     return assetsGenerating;
@@ -2485,16 +2512,16 @@ function relatedJobRunning(key) {
     return cardsGenerating;
   }
   if (key === stageJobKey("shots")) {
-    return episodeGenerating || promptGenerating;
+    return episodeGenerating || promptGenerating || scriptStructuring;
   }
   if (key === stageJobKey("videos")) {
-    return episodeGenerating || shotsGenerating;
+    return episodeGenerating || shotsGenerating || scriptStructuring;
   }
   if (key === "video-clip:video-clips" || key === "video-task:refresh") {
-    return episodeGenerating || promptGenerating;
+    return episodeGenerating || promptGenerating || scriptStructuring;
   }
   if (key.startsWith("video-clip:")) {
-    return episodeGenerating || promptGenerating || isJobRunning("video-clip:video-clips");
+    return episodeGenerating || promptGenerating || scriptStructuring || isJobRunning("video-clip:video-clips");
   }
   if (key === stageJobKey("images")) {
     return cardsGenerating;
@@ -2502,8 +2529,8 @@ function relatedJobRunning(key) {
   if (key === stageJobKey("cards")) {
     return assetsGenerating || promptGenerating || episodeGenerating;
   }
-  if (key === "project:story:save" || key === "project:config:save" || key === "episode:script:save") {
-    return shotsGenerating || promptGenerating || episodeGenerating;
+  if (key === "project:story:save" || key === "project:config:save" || key === "episode:script:save" || key === "episode:brief:save") {
+    return shotsGenerating || promptGenerating || episodeGenerating || scriptStructuring;
   }
   return false;
 }
@@ -2532,13 +2559,17 @@ function updateAvailability() {
     els.addEpisodeBtn.title = ready ? "添加剧集" : "请先完成项目剧本、项目属性和项目资产";
   }
   const hasEpisode = Boolean(getActiveEpisode());
+  const hasEpisodeScript = Boolean(getActiveEpisode()?.script);
   setButtonLoading(els.genScriptBtn, "script", !projectScriptInputReady() || isJobRunning("batch:episode"));
   setButtonLoading(els.genCardsBtn, "cards", !projectScriptReady() || relatedJobRunning(stageJobKey("cards")));
   setButtonLoading(els.genImagesBtn, "images", !countCards(current.state?.cards) || relatedJobRunning(stageJobKey("images")));
   if (els.genImagesBtn) {
     els.genImagesBtn.title = countCards(current.state?.cards) ? "按当前项目风格强制重新生成全部资产参考图" : "请先提取或添加资产";
   }
-  setButtonLoading(els.genShotsBtn, "shots", !hasEpisode || relatedJobRunning(stageJobKey("shots")));
+  setButtonLoading(els.genShotsBtn, "shots", !hasEpisodeScript || relatedJobRunning(stageJobKey("shots")));
+  if (els.genShotsBtn) {
+    els.genShotsBtn.title = hasEpisodeScript ? "根据当前本集结构化剧本生成 15s 分镜脚本" : "请先在分集剧本页生成/完善本集结构化剧本";
+  }
   setButtonLoading(els.genVideosBtn, "videos", !hasEpisode || !(getActiveEpisode()?.shots || []).length || relatedJobRunning(stageJobKey("videos")));
   setStandaloneButtonLoading(els.genVideoClipsBtn, "video-clip:video-clips", !hasEpisode || !(getActiveEpisode()?.promptPackages || []).length || relatedJobRunning("video-clip:video-clips"), "生成中...");
   const pendingVideos = (getActiveEpisode()?.videos || []).filter((video) => video.taskId && !["completed", "failed", "cancelled"].includes(String(video.status || "").toLowerCase())).length;
@@ -2549,11 +2580,13 @@ function updateAvailability() {
     els.exportPromptPackagesBtn.title = packageCount ? "导出当前剧集全部 Seedance 提示词包" : "请先生成 Seedance 提示词包";
   }
   if (els.saveEpisodeScriptBtn) els.saveEpisodeScriptBtn.disabled = isJobRunning("episode:script:save") || relatedJobRunning("episode:script:save") || !hasEpisode;
+  if (els.saveEpisodeBriefBtn) els.saveEpisodeBriefBtn.disabled = isJobRunning("episode:brief:save") || relatedJobRunning("episode:brief:save") || !hasEpisode;
+  setStandaloneButtonLoading(els.structureEpisodeScriptBtn, episodeScriptJobKey(), !hasEpisode || relatedJobRunning(episodeScriptJobKey()), "生成中...");
   if (els.saveStoryBtn) els.saveStoryBtn.disabled = isJobRunning("project:story:save") || relatedJobRunning("project:story:save");
   if (els.saveConfigBtn) els.saveConfigBtn.disabled = isJobRunning("project:config:save") || relatedJobRunning("project:config:save");
   if (els.runAllBtn) {
-    els.runAllBtn.disabled = isJobRunning("batch:episode") || !hasEpisode || current.studioMode !== "episodes";
-    els.runAllBtn.title = hasEpisode ? "生成当前剧集提示词" : "请先创建并选择剧集";
+    els.runAllBtn.disabled = isJobRunning("batch:episode") || !hasEpisodeScript || current.studioMode !== "episodes";
+    els.runAllBtn.title = hasEpisodeScript ? "生成当前剧集提示词" : "请先生成/完善本集结构化剧本";
   }
   scheduleVideoTaskPolling();
   renderJobFeedback();
@@ -2838,7 +2871,7 @@ function renderStatus(state, episode) {
     countCards(state.cards) ? "资产" : ""
   ].filter(Boolean);
   setText("statusProjectSetup", setupParts.length ? setupParts.join(" / ") : "待设置");
-  setText("statusEpisodeScript", episode?.script ? "已填写" : "待填写");
+  setText("statusEpisodeScript", episode ? episodeScriptStatusLabel(episode.scriptStatus || episodeScriptStatusFromClient(episode)) : "待填写");
   setText("statusShots", episode?.shots?.length ? `${episode.shots.length} 镜` : "未生成");
   const videoCount = (episode?.videos || []).length;
   setText("statusVideos", videoCount ? `${videoCount} 段` : "待视频片段");
@@ -2876,12 +2909,18 @@ function updateSettingsTabLocks() {
 function renderEpisodeEditor(episode, state) {
   if (!episode) {
     els.currentEpisodeTitle.textContent = "分集剧本";
-    els.episodeScriptInput.value = "";
+    if (document.activeElement !== els.episodeScriptInput) {
+      els.episodeScriptInput.value = "";
+    }
+    renderEpisodeScriptStatus(null);
     renderScript(null, els.episodeScriptOutput, "请先创建或选择剧集。");
   } else {
-    els.currentEpisodeTitle.textContent = `${episode.title}剧本`;
-    els.episodeScriptInput.value = episode.synopsis || episode.script?.synopsis || "";
-    renderScript(episode.script || state.storyScript, els.episodeScriptOutput, "当前剧集还没有剧本。");
+    els.currentEpisodeTitle.textContent = `${episode.title} 剧本`;
+    if (document.activeElement !== els.episodeScriptInput) {
+      els.episodeScriptInput.value = episode.brief || episode.synopsis || "";
+    }
+    renderEpisodeScriptStatus(episode);
+    renderScript(episode.script, els.episodeScriptOutput, "本集结构化剧本尚未生成。请先填写故事意图，或直接点击“生成/完善剧本”自动续写。");
   }
   const project = current.config?.project || {};
   els.inheritedAttrs.innerHTML = [
@@ -2891,6 +2930,93 @@ function renderEpisodeEditor(episode, state) {
     `字幕：${project.subtitles === "off" ? "无字幕" : "有字幕"}`,
     `对白：${languageName(project.dialogueLanguage || project.language)}`
   ].map((item) => `<span>${escapeHtml(item)}</span>`).join("");
+}
+
+function renderEpisodeScriptStatus(episode) {
+  if (!els.episodeScriptStatus) return;
+  if (!episode) {
+    els.episodeScriptStatus.innerHTML = "";
+    return;
+  }
+  const key = episodeScriptJobKey(episode.id);
+  const job = jobs.get(key);
+  const running = job?.status === "running";
+  const failed = job?.status === "error";
+  const status = running ? "structuring" : failed ? "failed" : (episode.scriptStatus || episodeScriptStatusFromClient(episode));
+  const tone = episodeScriptStatusTone(status);
+  const sourceMode = episode.scriptSourceMode || (episode.brief ? "brief_guided" : "auto_continue");
+  const selected = normalizeClientStringList(episode.selectedBeats);
+  const deferred = normalizeClientStringList(episode.deferredBeats);
+  const meta = [
+    `<span class="status-pill ${escapeAttr(tone)}">${escapeHtml(episodeScriptStatusLabel(status))}</span>`,
+    `<span class="tag">${escapeHtml(episodeScriptSourceModeLabel(sourceMode))}</span>`
+  ];
+  if (episode.scriptStructuredAt) meta.push(`<span class="tag">结构化：${escapeHtml(formatTime(episode.scriptStructuredAt))}</span>`);
+  if (episode.briefUpdatedAt) meta.push(`<span class="tag">意图：${escapeHtml(formatTime(episode.briefUpdatedAt))}</span>`);
+  els.episodeScriptStatus.innerHTML = `
+    ${running ? `<div class="pending-panel is-live"><span class="spinner"></span><strong>${escapeHtml(job?.label || "AI 正在生成/完善本集剧本")}</strong><small>可继续浏览其他模块，完成后会自动刷新状态。</small></div>` : ""}
+    ${failed ? `<small class="prompt-box error-box">${escapeHtml(job?.serverError || episode.scriptAdapterError || "生成/完善失败，请检查模型配置后重试。")}</small>` : ""}
+    <div class="episode-status-row">${meta.join("")}</div>
+    ${episode.capacityNote ? `<p class="episode-capacity-note">${escapeHtml(episode.capacityNote)}</p>` : ""}
+    ${selected.length || deferred.length ? `
+      <div class="episode-beat-grid">
+        ${renderEpisodeBeatList("本集采用", selected)}
+        ${renderEpisodeBeatList("顺延到后续", deferred)}
+      </div>
+    ` : ""}
+    ${status === "stale" ? `<small class="warning-text">故事意图已修改，建议重新点击“生成/完善剧本”，否则后续分镜仍会基于旧结构化剧本。</small>` : ""}
+  `;
+}
+
+function episodeScriptStatusFromClient(episode = {}) {
+  if (episode.script) return "structured";
+  if (episode.brief || episode.synopsis) return "brief_saved";
+  return "empty";
+}
+
+function episodeScriptStatusLabel(status = "") {
+  return {
+    empty: "未填写意图",
+    brief_saved: "意图已保存",
+    stale: "需重新完善",
+    structured: "已结构化",
+    structuring: "生成中",
+    failed: "生成失败"
+  }[status] || "待处理";
+}
+
+function episodeScriptStatusTone(status = "") {
+  return {
+    structured: "ok",
+    structuring: "pending",
+    stale: "warning",
+    failed: "danger",
+    brief_saved: "pending"
+  }[status] || "";
+}
+
+function episodeScriptSourceModeLabel(mode = "") {
+  return {
+    brief_guided: "按人工意图完善",
+    auto_continue: "自动续写",
+    manual: "手动剧本",
+    local: "本地"
+  }[mode] || "待生成";
+}
+
+function renderEpisodeBeatList(title, items = []) {
+  if (!items.length) return "";
+  return `
+    <div class="episode-beat-list">
+      <strong>${escapeHtml(title)}</strong>
+      ${items.slice(0, 6).map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+    </div>
+  `;
+}
+
+function normalizeClientStringList(values = []) {
+  if (!Array.isArray(values)) return [];
+  return values.map((value) => String(value || "").trim()).filter(Boolean);
 }
 
 function displayProjectTitle(project) {
@@ -3650,6 +3776,7 @@ function normalizeClientState(raw = {}) {
       videos: raw.videos || []
     }];
   }
+  episodes = episodes.map((episode, index) => normalizeClientEpisode(episode, index + 1));
   return {
     ...raw,
     storyScript,
@@ -3660,6 +3787,32 @@ function normalizeClientState(raw = {}) {
     activeEpisodeId: raw.activeEpisodeId || episodes[0]?.id || null,
     jobs: Array.isArray(raw.jobs) ? raw.jobs : [],
     events: Array.isArray(raw.events) ? raw.events : []
+  };
+}
+
+function normalizeClientEpisode(raw = {}, fallbackOrder = 1) {
+  const script = raw.script || null;
+  const brief = String(raw.brief ?? raw.synopsis ?? script?.synopsis ?? "").trim();
+  return {
+    ...raw,
+    id: raw.id || `EP${String(fallbackOrder).padStart(2, "0")}`,
+    title: raw.title || `第 ${fallbackOrder} 集`,
+    order: Number(raw.order || fallbackOrder),
+    script,
+    brief,
+    synopsis: String(raw.synopsis ?? script?.synopsis ?? brief ?? "").trim(),
+    briefUpdatedAt: raw.briefUpdatedAt || raw.brief_updated_at || raw.updatedAt || raw.createdAt || "",
+    scriptStatus: raw.scriptStatus || raw.script_status || episodeScriptStatusFromClient({ ...raw, brief, script }),
+    selectedBeats: normalizeClientStringList(raw.selectedBeats || raw.selected_beats),
+    deferredBeats: normalizeClientStringList(raw.deferredBeats || raw.deferred_beats),
+    capacityNote: String(raw.capacityNote || raw.capacity_note || "").trim(),
+    scriptSourceMode: String(raw.scriptSourceMode || raw.script_source_mode || (script ? "manual" : "")).trim(),
+    scriptStructuredAt: raw.scriptStructuredAt || raw.script_structured_at || "",
+    scriptAdapterError: String(raw.scriptAdapterError || raw.script_adapter_error || "").trim(),
+    shots: Array.isArray(raw.shots) ? raw.shots : [],
+    promptPackages: Array.isArray(raw.promptPackages) ? raw.promptPackages : [],
+    images: Array.isArray(raw.images) ? raw.images : [],
+    videos: Array.isArray(raw.videos) ? raw.videos : []
   };
 }
 
