@@ -42,6 +42,7 @@ let current = {
 let busy = false;
 const jobs = new Map();
 const seenServerJobErrors = new Set();
+const clientSessionStartedAt = Date.now();
 let serverJobPollTimer = null;
 let serverJobPollInFlight = false;
 let videoTaskPollTimer = null;
@@ -567,6 +568,7 @@ function syncServerJobs(serverJobs = [], options = {}) {
       const previous = jobs.get(key);
       const errorKey = `${job.id || key}:${job.updatedAt || ""}:${job.error || ""}`;
       if (previous?.status !== "error" || previous.serverError !== job.error) {
+        const shouldNotify = shouldNotifyServerJobFailure(job, previous, options);
         jobs.set(key, {
           status: "error",
           label: job.label || "生成失败",
@@ -574,7 +576,7 @@ function syncServerJobs(serverJobs = [], options = {}) {
           server: true,
           serverError: job.error || ""
         });
-        if (job.error && !seenServerJobErrors.has(errorKey)) {
+        if (shouldNotify && job.error && !seenServerJobErrors.has(errorKey)) {
           seenServerJobErrors.add(errorKey);
           toast(`${job.label || "生成失败"}：${job.error}`);
         }
@@ -611,7 +613,15 @@ function syncServerJobs(serverJobs = [], options = {}) {
 
 function syncSingleServerJob(job) {
   if (!job?.key) return;
-  syncServerJobs([job], { prune: false });
+  syncServerJobs([job], { prune: false, notify: true });
+}
+
+function shouldNotifyServerJobFailure(job = {}, previous = null, options = {}) {
+  if (options.notify === false) return false;
+  if (options.notify === true) return true;
+  if (previous?.status === "running") return true;
+  const updatedAt = Date.parse(job.updatedAt || job.createdAt || "");
+  return Number.isFinite(updatedAt) && updatedAt >= clientSessionStartedAt;
 }
 
 function hasServerRunningJobs() {
@@ -1824,6 +1834,10 @@ async function runAssetImage(assetId) {
     render();
     if (data.duplicate) {
       toast(`资产图正在生成中：${assetId}`);
+      return "keep-running";
+    }
+    const output = (Array.isArray(data.outputs) ? data.outputs : []).find((item) => item.assetId === assetId);
+    if (output && !output.url) {
       return "keep-running";
     }
     toast(`资产参考图完成：${assetId}`);
