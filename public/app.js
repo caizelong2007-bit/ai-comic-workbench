@@ -49,6 +49,7 @@ let videoTaskPollInFlight = false;
 let pendingDelete = null;
 let promptEditor = null;
 let shotEditor = null;
+let shotAssetPicker = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -106,6 +107,11 @@ function bindElements() {
     "assetImageHelp",
     "assetPreviewPanel",
     "assetImageHistory",
+    "shotAssetPickerModal",
+    "shotAssetPickerTitle",
+    "shotAssetPickerGrid",
+    "closeShotAssetPickerBtn",
+    "cancelShotAssetPickerBtn",
     "promptDetailModal",
     "closePromptDetailModalBtn",
     "promptDetailBody",
@@ -226,6 +232,15 @@ function bindEvents() {
     if (historyButton) {
       const row = current.assetHistoryRows?.[Number(historyButton.dataset.selectAssetHistory)];
       selectAssetHistoryImage(row?.url || "");
+    }
+  });
+  els.closeShotAssetPickerBtn.addEventListener("click", closeShotAssetPickerModal);
+  els.cancelShotAssetPickerBtn.addEventListener("click", closeShotAssetPickerModal);
+  els.shotAssetPickerModal.addEventListener("click", (event) => {
+    if (event.target === els.shotAssetPickerModal) closeShotAssetPickerModal();
+    const selectButton = event.target.closest("[data-select-shot-asset]");
+    if (selectButton) {
+      addShotReferenceAsset(selectButton.dataset.selectShotAsset);
     }
   });
   els.closePromptDetailModalBtn.addEventListener("click", closePromptDetailModal);
@@ -350,6 +365,17 @@ function bindEvents() {
     const shotAssetTab = event.target.closest("[data-shot-asset-tab]");
     if (shotAssetTab) {
       setShotAssetTab(shotAssetTab.dataset.shotId, shotAssetTab.dataset.shotAssetTab);
+      return;
+    }
+    const addShotAssetButton = event.target.closest("[data-add-shot-asset]");
+    if (addShotAssetButton) {
+      openShotAssetPickerModal(addShotAssetButton.dataset.addShotAsset);
+      return;
+    }
+    const removeShotAssetButton = event.target.closest("[data-remove-shot-asset]");
+    if (removeShotAssetButton) {
+      event.stopPropagation();
+      removeShotReferenceAsset(removeShotAssetButton.dataset.shotId, removeShotAssetButton.dataset.removeShotAsset);
       return;
     }
     const shotAsset = event.target.closest("[data-shot-asset]");
@@ -1265,9 +1291,9 @@ function parsePromptMentions(text = "", assets = promptEditor?.assetCatalog || c
   return accepted.sort((a, b) => a.index - b.index);
 }
 
-function decodePromptMentionText(text = "") {
+function decodePromptMentionText(text = "", assets = promptEditor?.assetCatalog || clientAssetCatalog()) {
   const source = String(text || "");
-  const mentions = parsePromptMentions(source);
+  const mentions = parsePromptMentions(source, assets);
   if (!mentions.length) return source;
   const pieces = [];
   let cursor = 0;
@@ -1852,6 +1878,101 @@ async function runExtractShotAssets(shotId) {
     toast(`提取资产失败：${shotId}: ${error.message}`);
     clearJobSoon(jobKey);
   }
+}
+
+function openShotAssetPickerModal(shotId = "") {
+  const shot = getActiveEpisode()?.shots?.find((item) => item.id === shotId);
+  if (!shot) {
+    toast("请先选择有效分镜");
+    return;
+  }
+  shotAssetPicker = { shotId };
+  els.shotAssetPickerTitle.textContent = `${shot.id || "分镜"} 添加参考资产`;
+  renderShotAssetPickerGrid();
+  els.shotAssetPickerModal.classList.remove("is-hidden");
+}
+
+function closeShotAssetPickerModal() {
+  shotAssetPicker = null;
+  els.shotAssetPickerModal.classList.add("is-hidden");
+  els.shotAssetPickerGrid.innerHTML = "";
+}
+
+function renderShotAssetPickerGrid() {
+  if (!shotAssetPicker) return;
+  const currentRefs = new Set(currentShotAssetRefs(shotAssetPicker.shotId));
+  const assets = clientAssetCatalog();
+  if (!assets.length) {
+    els.shotAssetPickerGrid.innerHTML = `<p class="empty">项目资产库暂无资产，请先在项目资产中添加。</p>`;
+    return;
+  }
+  els.shotAssetPickerGrid.innerHTML = assets.map((asset) => {
+    const selected = currentRefs.has(asset.id);
+    return `
+      <button class="shot-asset-picker-card ${selected ? "is-selected" : ""}" type="button" data-select-shot-asset="${escapeAttr(asset.id)}" ${selected ? "disabled" : ""}>
+        <span class="shot-asset-picker-thumb">
+          ${asset.imageUrl ? `<img src="${escapeAttr(asset.imageUrl)}" alt="${escapeAttr(asset.name || asset.id)}">` : `<span>${escapeHtml((asset.name || asset.id || "?").slice(0, 2))}</span>`}
+        </span>
+        <strong>${escapeHtml(asset.name || asset.id)}</strong>
+        <small>${escapeHtml(assetTypeLabel(asset.type))}${selected ? " · 已在本分镜" : ""}</small>
+      </button>
+    `;
+  }).join("");
+}
+
+async function addShotReferenceAsset(assetId = "") {
+  if (!shotAssetPicker?.shotId || !assetId) return;
+  const refs = currentShotAssetRefs(shotAssetPicker.shotId);
+  if (refs.includes(assetId)) {
+    toast("该资产已在当前分镜参考列表中");
+    return;
+  }
+  if (refs.length >= maxPromptReferenceAssets) {
+    toast(`当前最多保留 ${maxPromptReferenceAssets} 个参考资产，请先移除不必要的资产`);
+    return;
+  }
+  await saveShotReferenceAssets(shotAssetPicker.shotId, uniqueAssetIds([...refs, assetId]), {
+    message: "已添加到本分镜参考列表；已生成提示词不会自动插入该资产，请重新生成提示词或手动 @ 引用。"
+  });
+  closeShotAssetPickerModal();
+}
+
+async function removeShotReferenceAsset(shotId = "", assetId = "") {
+  if (!shotId || !assetId) return;
+  const asset = findClientAsset(assetId);
+  const refs = currentShotAssetRefs(shotId);
+  if (!refs.includes(assetId)) return;
+  const ok = confirm(`仅从本分镜移除“${asset?.name || assetId}”的参考图绑定，不会删除资产库，也不会删除提示词中的普通文字。继续吗？`);
+  if (!ok) return;
+  await saveShotReferenceAssets(shotId, refs.filter((id) => id !== assetId), {
+    message: "已从本分镜参考中移除；相关文字语义会保留为普通文本，视频需重新生成。"
+  });
+}
+
+async function saveShotReferenceAssets(shotId = "", assetRefs = [], options = {}) {
+  const episode = getActiveEpisode();
+  if (!episode || !shotId) {
+    toast("请先选择有效剧集和分镜");
+    return false;
+  }
+  return withBusy(`shot-assets:save:${shotId}`, async () => {
+    const data = await api.post("/api/shot-assets/save", {
+      episodeId: episode.id,
+      shotId,
+      assetRefs
+    });
+    applyServerData(data);
+    render();
+    if (options.message) toast(options.message);
+  }, "保存分镜参考资产失败");
+}
+
+function currentShotAssetRefs(shotId = "") {
+  const episode = getActiveEpisode();
+  const pack = (episode?.promptPackages || []).find((item) => item.shotId === shotId);
+  if (pack?.assetRefs?.length) return uniqueAssetIds(pack.assetRefs);
+  const shot = (episode?.shots || []).find((item) => item.id === shotId);
+  return uniqueAssetIds(shot?.assetRefs || []);
 }
 
 async function runPromptPackagesForCurrentEpisode() {
@@ -3087,10 +3208,13 @@ function renderShots(shots, packages) {
         </section>
         <section class="shot-cell shot-asset-cell">
           ${assetsRunning ? `<div class="cell-loading"><span class="spinner"></span><strong>正在提取资产</strong></div>` : ""}
-          <div class="shot-cell-tabs">
-            ${renderShotAssetTabs(shot.id, activeAssetTab)}
+          <div class="shot-asset-head">
+            <div class="shot-cell-tabs">
+              ${renderShotAssetTabs(shot.id, activeAssetTab)}
+            </div>
+            <button class="shot-asset-add" type="button" title="从项目资产库添加本分镜参考" aria-label="添加本分镜参考资产" data-add-shot-asset="${escapeAttr(shot.id)}">＋</button>
           </div>
-          ${renderShotAssetStrip(visibleAssets)}
+          ${renderShotAssetStrip(visibleAssets, shot.id)}
           <button class="pipeline-action" type="button" data-generate-package-assets="${escapeAttr(shot.id)}" data-job-key="${escapeAttr(packageAssetsJobKey(shot.id))}" data-idle-text="提取资产" data-loading-text="提取中..." ${assetsRunning ? "disabled" : ""}>${assetsRunning ? "提取中..." : "提取资产"}</button>
         </section>
         <section class="shot-cell shot-prompt-cell">
@@ -3225,25 +3349,28 @@ function inferShotAssets(shot = {}, assets = []) {
   return uniqueAssets([...byRefs, ...byText]).slice(0, 8);
 }
 
-function renderShotAssetStrip(assets = []) {
+function renderShotAssetStrip(assets = [], shotId = "") {
   if (!assets.length) {
     return `
       <div class="shot-asset-empty">
         <div class="asset-cube"></div>
-        <p>请用「生成提示词」匹配资产，或在资产中心手动添加后校验</p>
+        <p>点击右上角 ＋ 从项目资产库添加本分镜参考，或使用「提取资产」自动匹配</p>
       </div>
     `;
   }
   return `
     <div class="shot-asset-strip">
       ${assets.map((asset) => `
-        <button class="shot-asset-chip" type="button" data-shot-asset="${escapeAttr(asset.id)}" title="编辑${escapeAttr(asset.name || asset.id)}">
-          <div class="shot-asset-thumb">
-            ${asset.imageUrl ? `<img src="${escapeAttr(asset.imageUrl)}" alt="${escapeAttr(asset.name || asset.id)}">` : `<span>${escapeHtml((asset.name || asset.id || "?").slice(0, 2))}</span>`}
-          </div>
-          <strong>${escapeHtml(asset.name || asset.id)}</strong>
-          <small>${escapeHtml(asset.type || "asset")}</small>
-        </button>
+        <article class="shot-asset-chip">
+          <button class="shot-asset-main" type="button" data-shot-asset="${escapeAttr(asset.id)}" title="编辑${escapeAttr(asset.name || asset.id)}">
+            <span class="shot-asset-thumb">
+              ${asset.imageUrl ? `<img src="${escapeAttr(asset.imageUrl)}" alt="${escapeAttr(asset.name || asset.id)}">` : `<span>${escapeHtml((asset.name || asset.id || "?").slice(0, 2))}</span>`}
+            </span>
+            <strong>${escapeHtml(asset.name || asset.id)}</strong>
+            <small>${escapeHtml(asset.type || "asset")}</small>
+          </button>
+          <button class="shot-asset-remove" type="button" aria-label="从本分镜移除此参考资产" title="仅从本分镜移除此参考，不删除资产库" data-shot-id="${escapeAttr(shotId)}" data-remove-shot-asset="${escapeAttr(asset.id)}">×</button>
+        </article>
       `).join("")}
     </div>
   `;
@@ -4451,24 +4578,27 @@ function detachPromptMentionEditors() {
 }
 
 function renderPromptEditRow({ key, label, value, refs = [], multiline = false }) {
-  const editorValue = promptEditorInitialValue(value || "", refs);
+  const uniqueRefs = uniqueAssetIds(refs).filter((id) => findClientAsset(id));
+  const editorValue = promptEditorInitialValue(value || "", uniqueRefs);
   return `
     <div class="prompt-edit-row">
       <label>
         <span>${escapeHtml(label)}</span>
-        <textarea class="prompt-mention-editor ${multiline ? "is-multiline" : ""}" data-prompt-field="${escapeAttr(key)}" data-prompt-editor="true" rows="${multiline ? 3 : 1}" placeholder="输入 @ 可从项目资产库插入参考对象">${escapeHtml(encodePromptTagifyText(editorValue))}</textarea>
+        <textarea class="prompt-mention-editor ${multiline ? "is-multiline" : ""}" data-prompt-field="${escapeAttr(key)}" data-prompt-editor="true" data-allowed-refs="${escapeAttr(uniqueRefs.join(","))}" rows="${multiline ? 3 : 1}" placeholder="输入 @ 可从项目资产库插入参考对象">${escapeHtml(encodePromptTagifyText(editorValue, uniqueRefs))}</textarea>
       </label>
     </div>
   `;
 }
 
 function promptEditorInitialValue(text = "", refs = []) {
-  const source = decodePromptMentionText(decodePromptTagifyText(text || ""));
+  const allowedAssets = uniqueAssetIds(refs).map(findClientAsset).filter(Boolean);
+  const source = decodePromptMentionText(decodePromptTagifyText(text || ""), allowedAssets);
   if (!source.trim()) return "";
-  const visibleMentions = parsePromptMentions(source);
+  const visibleMentions = parsePromptMentions(source, allowedAssets);
   if (visibleMentions.length) return source;
-  if (promptEditor?.manualEdited) return source;
-  return insertPromptRefsIntoExistingText(source, refs);
+  const usableRefs = uniqueAssetIds(refs).filter((id) => findClientAsset(id));
+  if (promptEditor?.manualEdited && !usableRefs.length) return source;
+  return insertPromptRefsIntoExistingText(source, usableRefs);
 }
 
 function insertPromptRefsIntoExistingText(text = "", refs = []) {
@@ -4499,15 +4629,25 @@ function promptFieldText(field) {
 
 function promptDraftField(field) {
   const raw = promptTagifyFieldValue(field);
-  const text = decodePromptMentionText(decodePromptTagifyText(raw));
+  const allowedAssets = allowedPromptFieldAssets(field);
+  const text = decodePromptMentionText(decodePromptTagifyText(raw), allowedAssets);
   const refs = [
     ...parsePromptTagifyMentions(raw).map((item) => item.id),
-    ...parsePromptMentions(text).map((item) => item.id)
+    ...parsePromptMentions(text, allowedAssets).map((item) => item.id)
   ];
   return {
     refs: uniqueAssetIds(refs),
     text: text.trim()
   };
+}
+
+function allowedPromptFieldAssets(field) {
+  if (field?.hasAttribute?.("data-allowed-refs")) {
+    const ids = uniqueAssetIds(String(field.dataset.allowedRefs || "").split(","));
+    return ids.map(findClientAsset).filter(Boolean);
+  }
+  const ids = uniqueAssetIds(String(field?.dataset?.allowedRefs || "").split(","));
+  return ids.length ? ids.map(findClientAsset).filter(Boolean) : promptEditor?.assetCatalog || clientAssetCatalog();
 }
 
 function promptTagifyFieldValue(field) {
@@ -4562,9 +4702,12 @@ function syncPromptTagifyEditors() {
   });
 }
 
-function encodePromptTagifyText(text = "") {
+function encodePromptTagifyText(text = "", refs = []) {
   const source = decodePromptTagifyText(text || "");
-  const mentions = parsePromptMentions(source);
+  const scopedAssets = arguments.length >= 2
+    ? uniqueAssetIds(refs).map(findClientAsset).filter(Boolean)
+    : promptEditor?.assetCatalog || clientAssetCatalog();
+  const mentions = parsePromptMentions(source, scopedAssets);
   if (!mentions.length) return source;
   const pieces = [];
   let cursor = 0;

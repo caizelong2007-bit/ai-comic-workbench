@@ -345,6 +345,11 @@ async function route(req, res) {
     return sendJson(res, 200, await saveShotEdits(body));
   }
 
+  if (pathname === "/api/shot-assets/save" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await saveShotAssetRefs(body));
+  }
+
   if (pathname === "/api/reset" && req.method === "POST") {
     const state = freshState();
     await writeState(state);
@@ -795,6 +800,117 @@ async function saveShotEdits(payload = {}) {
     return state;
   });
   return { ok: true, state: latestState };
+}
+
+async function saveShotAssetRefs(payload = {}) {
+  const shotId = stringOr(payload.shotId || payload.id, "");
+  if (!shotId) {
+    throw new Error("Missing shot id");
+  }
+  const latestState = await withStateWriteLock(async () => {
+    const state = await readState();
+    const episode = payload.episodeId
+      ? (state.episodes || []).find((item) => item.id === payload.episodeId)
+      : requireActiveEpisode(state);
+    if (!episode) {
+      throw new Error("Episode not found");
+    }
+    const shot = (episode.shots || []).find((item) => item.id === shotId);
+    if (!shot) {
+      throw new Error("Shot not found");
+    }
+    const assets = flattenCards(state.cards);
+    const validAssetIds = new Set(assets.map((asset) => asset.id));
+    const existingPack = (episode.promptPackages || []).find((pack) => pack.shotId === shotId);
+    const currentRefs = filterAssetRefs(existingPack?.assetRefs?.length ? existingPack.assetRefs : shot.assetRefs || [], validAssetIds);
+    const nextRefs = filterAssetRefs(payload.assetRefs || payload.asset_refs || [], validAssetIds).slice(0, MAX_SHOT_ASSET_REFS);
+    if (!nextRefs.length && payload.requireNonEmpty) {
+      throw new Error("Asset refs cannot be empty");
+    }
+    const changed = currentRefs.join("|") !== nextRefs.join("|");
+    if (!changed) return state;
+
+    const updatedAt = new Date().toISOString();
+    shot.assetRefs = nextRefs;
+    shot.manualEditedAt = updatedAt;
+    shot.updatedAt = updatedAt;
+
+    const removedRefs = currentRefs.filter((id) => !nextRefs.includes(id));
+    const addedRefs = nextRefs.filter((id) => !currentRefs.includes(id));
+    episode.promptPackages = (episode.promptPackages || []).map((pack) => {
+      if (pack.shotId !== shotId) return pack;
+      const edited = mergePromptPackageAssetRefs(pack, nextRefs, removedRefs, addedRefs, state.cards, state.assetImages || [], updatedAt);
+      return edited.changed ? edited.pack : pack;
+    });
+    episode.videos = (episode.videos || []).map((video) => video.shotId === shotId
+      ? {
+        ...video,
+        stale: true,
+        staleReason: removedRefs.length ? "shot-asset-ref-removed" : "shot-asset-ref-added",
+        staleAt: updatedAt
+      }
+      : video);
+    touchEpisode(episode);
+    touchState(state);
+    addEvent(
+      state,
+      "shot.assets.edited",
+      `${episode.title} ${shotId} 参考资产已更新`,
+      "user",
+      [
+        addedRefs.length ? `添加 ${addedRefs.join(", ")}` : "",
+        removedRefs.length ? `移除 ${removedRefs.join(", ")}` : ""
+      ].filter(Boolean).join("；")
+    );
+    await writeState(state);
+    await syncActiveProject({ state });
+    return state;
+  });
+  return { ok: true, state: latestState };
+}
+
+function mergePromptPackageAssetRefs(pack = {}, nextRefs = [], removedRefs = [], addedRefs = [], cards = {}, assetImages = [], updatedAt = new Date().toISOString()) {
+  let changed = false;
+  const nextRefSet = new Set(nextRefs);
+  const removedSet = new Set(removedRefs);
+  const shouldRegeneratePrompt = addedRefs.length > 0;
+  const wasStale = isPromptPackageStale(pack);
+  const nextStale = shouldRegeneratePrompt || wasStale;
+  const removeDeletedRefs = (refs = []) => {
+    const input = Array.isArray(refs) ? refs : [];
+    const output = input.filter((id) => !removedSet.has(id));
+    if (output.length !== input.length) changed = true;
+    return output;
+  };
+  const oldPackRefs = Array.isArray(pack.assetRefs) ? pack.assetRefs : [];
+  if (oldPackRefs.join("|") !== nextRefs.join("|")) changed = true;
+  const nextPack = {
+    ...pack,
+    assetRefs: nextRefs,
+    assetReferences: assetReferencesForRefs(nextRefs, flattenCards(cards), assetImages),
+    audio: (pack.audio || []).map((row) => ({
+      ...row,
+      assetRefs: removeDeletedRefs(row.assetRefs)
+    })),
+    dialogue: (pack.dialogue || []).map((row) => {
+      if (removedSet.has(row.speakerAssetId)) {
+        changed = true;
+        return { ...row, speakerAssetId: "" };
+      }
+      return row;
+    }),
+    subShots: (pack.subShots || []).map((subShot) => ({
+      ...subShot,
+      assetRefs: removeDeletedRefs(subShot.assetRefs).filter((id) => nextRefSet.has(id))
+    })),
+    stale: nextStale,
+    staleReason: shouldRegeneratePrompt ? "shot-asset-ref-added" : pack.staleReason || "",
+    staleAt: shouldRegeneratePrompt ? updatedAt : pack.staleAt || "",
+    assetRefsEditedAt: updatedAt,
+    updatedAt
+  };
+  nextPack.seedancePrompt = "";
+  return { pack: nextPack, changed };
 }
 
 function mergeShotEdits(currentShot = {}, patch = {}, updatedAt = new Date().toISOString()) {
