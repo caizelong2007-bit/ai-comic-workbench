@@ -42,6 +42,7 @@ let current = {
 let busy = false;
 const jobs = new Map();
 const seenServerJobErrors = new Set();
+const clientSessionStartedAt = Date.now();
 let serverJobPollTimer = null;
 let serverJobPollInFlight = false;
 let videoTaskPollTimer = null;
@@ -61,11 +62,9 @@ document.addEventListener("DOMContentLoaded", () => {
 function bindElements() {
   for (const id of [
     "serviceStatus",
-    "runAllBtn",
     "openModelCenterBtn",
     "openEventsBtn",
     "backProjectsBtn",
-    "refreshBtn",
     "projectHome",
     "studioShell",
     "projectGrid",
@@ -168,7 +167,6 @@ function bindElements() {
     "cardsOutput",
     "videosOutput",
     "eventLog",
-    "resetBtn",
     "toast",
     "viewEyebrow",
     "viewTitle",
@@ -184,7 +182,6 @@ function bindElements() {
 }
 
 function bindEvents() {
-  els.refreshBtn.addEventListener("click", loadState);
   els.openModelCenterBtn.addEventListener("click", openModelCenterModal);
   els.openEventsBtn.addEventListener("click", openEventsModal);
   els.closeEventsModalBtn.addEventListener("click", closeEventsModal);
@@ -302,8 +299,6 @@ function bindEvents() {
   els.genVideoClipsBtn.addEventListener("click", () => runVideoClipsForCurrentEpisode());
   els.refreshVideoTasksBtn.addEventListener("click", () => refreshVideoTasks());
   els.exportPromptPackagesBtn.addEventListener("click", exportEpisodePromptPackages);
-  els.runAllBtn.addEventListener("click", runAll);
-  els.resetBtn.addEventListener("click", resetPipeline);
 
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.addEventListener("click", () => setActiveView(button.dataset.view));
@@ -567,6 +562,7 @@ function syncServerJobs(serverJobs = [], options = {}) {
       const previous = jobs.get(key);
       const errorKey = `${job.id || key}:${job.updatedAt || ""}:${job.error || ""}`;
       if (previous?.status !== "error" || previous.serverError !== job.error) {
+        const shouldNotify = shouldNotifyServerJobFailure(job, previous, options);
         jobs.set(key, {
           status: "error",
           label: job.label || "生成失败",
@@ -574,7 +570,7 @@ function syncServerJobs(serverJobs = [], options = {}) {
           server: true,
           serverError: job.error || ""
         });
-        if (job.error && !seenServerJobErrors.has(errorKey)) {
+        if (shouldNotify && job.error && !seenServerJobErrors.has(errorKey)) {
           seenServerJobErrors.add(errorKey);
           toast(`${job.label || "生成失败"}：${job.error}`);
         }
@@ -611,7 +607,15 @@ function syncServerJobs(serverJobs = [], options = {}) {
 
 function syncSingleServerJob(job) {
   if (!job?.key) return;
-  syncServerJobs([job], { prune: false });
+  syncServerJobs([job], { prune: false, notify: true });
+}
+
+function shouldNotifyServerJobFailure(job = {}, previous = null, options = {}) {
+  if (options.notify === false) return false;
+  if (options.notify === true) return true;
+  if (previous?.status === "running") return true;
+  const updatedAt = Date.parse(job.updatedAt || job.createdAt || "");
+  return Number.isFinite(updatedAt) && updatedAt >= clientSessionStartedAt;
 }
 
 function hasServerRunningJobs() {
@@ -749,8 +753,6 @@ function setStudioMode(mode) {
   els.projectSetupNav.classList.toggle("is-hidden", mode !== "settings");
   els.episodeListNav.classList.toggle("is-hidden", mode !== "episodes");
   els.episodeFlowNav.classList.toggle("is-hidden", mode !== "episodes");
-  els.runAllBtn.classList.toggle("is-hidden", mode !== "episodes");
-  els.resetBtn.classList.toggle("is-hidden", mode !== "episodes");
 }
 
 async function addEpisode() {
@@ -910,7 +912,6 @@ function showProjectHome() {
   current.mode = "home";
   els.projectHome.classList.remove("is-hidden");
   els.studioShell.classList.add("is-hidden");
-  els.runAllBtn.classList.add("is-hidden");
   els.backProjectsBtn.classList.add("is-hidden");
   renderProjects();
 }
@@ -1787,35 +1788,6 @@ async function runStage(stage) {
   }, `${stageName(stage)}失败`);
 }
 
-async function runAll() {
-  await withBusy("batch:episode", async () => {
-    await saveCurrentConfig();
-    setJob(stageJobKey("shots"), "running", `正在生成${stageName("shots")}`);
-    toast(`正在生成${stageName("shots")}`);
-    try {
-      const shotsData = await api.post("/api/generate/shots", { episodeId: getActiveEpisode()?.id });
-      applyServerData(shotsData);
-      if (shotsData.duplicate) {
-        toast("15s 分镜正在生成中，请稍后刷新查看");
-        return "keep-running";
-      }
-      setJob(stageJobKey("shots"), "done", `${stageName("shots")}完成`);
-      clearJobSoon(stageJobKey("shots"));
-      render();
-    } catch (error) {
-      setJob(stageJobKey("shots"), "error", `${stageName("shots")}失败`);
-      clearJobSoon(stageJobKey("shots"));
-      throw error;
-    }
-    await generatePromptPackagesByShot();
-    const data = await api.get("/api/state");
-    applyServerData(data);
-    render();
-    setActiveView("shot-making");
-    toast("当前剧集的 Seedance 分镜提示词已生成，可在分镜制作的提示词列查看");
-  }, "生成流程失败");
-}
-
 async function runAssetImage(assetId) {
   await withBusy(assetJobKey(assetId), async () => {
     await saveCurrentConfig();
@@ -1824,6 +1796,10 @@ async function runAssetImage(assetId) {
     render();
     if (data.duplicate) {
       toast(`资产图正在生成中：${assetId}`);
+      return "keep-running";
+    }
+    const output = (Array.isArray(data.outputs) ? data.outputs : []).find((item) => item.assetId === assetId);
+    if (output && !output.url) {
       return "keep-running";
     }
     toast(`资产参考图完成：${assetId}`);
@@ -2498,17 +2474,6 @@ async function saveCurrentConfig() {
   return data.config;
 }
 
-async function resetPipeline() {
-  if (!confirm("重置会清空当前工作台状态，但不会删除已生成的 cache 文件。继续吗？")) return;
-  await withBusy("state:reset", async () => {
-    const data = await api.post("/api/reset");
-    current.state = normalizeClientState(data.state);
-    render();
-    showProjectSettings();
-    toast("流水线已重置");
-  }, "重置失败");
-}
-
 async function withBusy(keyOrTask, taskOrFailPrefix, maybeFailPrefix) {
   const key = typeof keyOrTask === "string" ? keyOrTask : "global";
   const task = typeof keyOrTask === "string" ? taskOrFailPrefix : keyOrTask;
@@ -2705,10 +2670,6 @@ function updateAvailability() {
   setStandaloneButtonLoading(els.structureEpisodeScriptBtn, episodeScriptJobKey(), !hasEpisode || relatedJobRunning(episodeScriptJobKey()), "生成中...");
   if (els.saveStoryBtn) els.saveStoryBtn.disabled = isJobRunning("project:story:save") || relatedJobRunning("project:story:save");
   if (els.saveConfigBtn) els.saveConfigBtn.disabled = isJobRunning("project:config:save") || relatedJobRunning("project:config:save");
-  if (els.runAllBtn) {
-    els.runAllBtn.disabled = isJobRunning("batch:episode") || !hasEpisodeScript || current.studioMode !== "episodes";
-    els.runAllBtn.title = hasEpisodeScript ? "生成当前剧集提示词" : "请先生成/完善本集结构化剧本";
-  }
   scheduleVideoTaskPolling();
   renderJobFeedback();
   updateSettingsTabLocks();
@@ -2945,7 +2906,10 @@ function renderProjects() {
     ...projects.map((project) => `
       <article class="project-card" data-open-project="${escapeAttr(project.id)}">
         <div class="project-cover">
-          ${project.coverUrl ? `<img src="${escapeAttr(project.coverUrl)}" alt="${escapeAttr(project.title)}">` : `<div class="default-cover"><span>AI</span></div>`}
+          ${project.coverUrl ? `
+            <img class="project-cover-bg" src="${escapeAttr(project.coverUrl)}" alt="" aria-hidden="true">
+            <img class="project-cover-image" src="${escapeAttr(project.coverUrl)}" alt="${escapeAttr(project.title)}">
+          ` : `<div class="default-cover"><span>AI</span></div>`}
         </div>
         <div class="project-card-body">
           <div class="project-card-title">
@@ -3221,7 +3185,6 @@ function renderShots(shots, packages) {
           ${promptRunning ? `<div class="pending-panel is-live"><span class="spinner"></span><strong>Seedance 提示词生成中</strong><small>可继续浏览其他分镜</small></div>` : pack ? renderPromptSummary(pack, shot, assets) : promptError ? renderPromptError(promptError) : `<div class="pending-panel">待生成</div>`}
           <div class="prompt-action-row">
             ${pack ? `<button class="pipeline-action secondary-action" type="button" data-view-prompt="${escapeAttr(pack.id)}">查看提示词</button>` : ""}
-            ${pack ? `<button class="pipeline-action secondary-action" type="button" data-export-prompt="${escapeAttr(pack.id)}">导出 JSON</button>` : ""}
             <button class="pipeline-action" type="button" data-generate-prompt="${escapeAttr(shot.id)}" data-job-key="${escapeAttr(promptKey)}" data-idle-text="${pack ? "重新生成" : "生成提示词"}" data-loading-text="生成中..." ${promptLocked ? "disabled" : ""}>${promptRunning ? "生成中..." : pack ? "重新生成" : "生成提示词"}</button>
           </div>
         </section>
