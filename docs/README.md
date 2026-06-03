@@ -9,6 +9,7 @@
 - [制作流程](./workflow.md)：梳理从创建项目到生成视频片段的完整链路。
 - [模型与提示词](./model-and-prompt-flow.md)：说明 LLM、生图、视频模型分别在何处调用，以及提示词包如何进入 Seedance。
 - [分镜脚本生成与资产提取标准](./shot-script-asset-extraction-standard.md)：定义 15s 分镜内容量控制、前端可视化编辑、资产提取和资产合并校验标准。
+- [分集故事意图与 AI 结构化剧本需求](./episode-script-brief-structure-requirements.md)：定义用户故事意图、AI 结构化分集剧本、容量控制和异步状态反馈需求。
 - [Prompt Mention Editor Standard](./prompt-mention-editor-standard.md)：记录 inline asset chip 编辑器的实现标准。
 - [数据与缓存](./data-storage.md)：说明本地 JSON、缓存目录、运行记录和敏感配置的管理方式。
 - [运行与版本管理](./operations-and-release.md)：说明本地启动、Git 基线、发布交付注意事项。

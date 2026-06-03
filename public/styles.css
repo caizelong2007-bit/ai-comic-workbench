@@ -135,6 +135,24 @@ button.is-loading { cursor: wait; }
   background: #e9f7f7;
 }
 
+.status-pill.pending {
+  border-color: rgba(38, 104, 201, .26);
+  color: var(--blue);
+  background: #edf4ff;
+}
+
+.status-pill.warning {
+  border-color: rgba(166, 96, 0, .3);
+  color: var(--amber);
+  background: #fff7e8;
+}
+
+.status-pill.danger {
+  border-color: rgba(180, 35, 24, .28);
+  color: var(--red);
+  background: #fff0ee;
+}
+
 .spinner {
   display: inline-block;
   width: 16px;
@@ -911,6 +929,57 @@ legend {
 }
 
 .muted-text { color: var(--muted); margin: 10px 0 0; }
+
+.episode-script-status {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.episode-status-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.episode-capacity-note {
+  margin: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(38, 104, 201, .16);
+  border-radius: 7px;
+  background: #f4f8ff;
+  color: #365b88;
+}
+
+.episode-beat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.episode-beat-list {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+}
+
+.episode-beat-list strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.episode-beat-list span {
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--soft);
+  color: #4e5a68;
+}
 
 .attribute-strip {
   display: flex;
