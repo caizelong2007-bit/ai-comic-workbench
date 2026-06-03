@@ -297,6 +297,16 @@ async function route(req, res) {
     return sendJson(res, 200, await updateEpisodeScript(body));
   }
 
+  if (pathname === "/api/episodes/brief" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await updateEpisodeBrief(body));
+  }
+
+  if (pathname === "/api/episodes/structure-script" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await structureEpisodeScript(body));
+  }
+
   if (pathname === "/api/config" && req.method === "POST") {
     const body = await readBody(req);
     const current = await readConfig();
@@ -1877,20 +1887,27 @@ function buildEpisodeScriptPrompt(config, state, episodeInfo = {}) {
     dialogue: shot.dialogue,
     continuity: shot.continuity
   })).slice(-6);
+  const sourceMode = episodeInfo.mode || (episodeInfo.note ? "brief_guided" : "auto_continue");
   return JSON.stringify({
-    task: "create_episode_script",
-    requirement: "根据项目总剧本和上一集内容，续写当前单集剧本，并返回结构化 JSON。保持故事连贯、角色状态连续、结尾有钩子，适合后续拆成 15s 分镜。",
+    task: "structure_episode_script_from_brief",
+    requirement: "根据用户本集故事意图、项目总剧本和上一集内容，生成/完善当前单集结构化剧本。保持故事连贯、角色状态连续、容量适合后续拆成 6-10 个 15s 分镜。",
     languagePolicy: promptLanguagePolicy(config.project),
     rules: [
-      "Return JSON only with shape { script: {...} }.",
+      "Return JSON only with shape { brief, script, selectedBeats, deferredBeats, capacityNote, sourceMode }.",
       "Do not rewrite the whole project; write only the current episode.",
       "Use the inherited project video length as the target episode length.",
-      "Continue from previousEpisode when present; otherwise start from the project opening.",
+      sourceMode === "brief_guided"
+        ? "The user brief is the priority direction. Preserve its core events, but trim or defer excessive content."
+        : "The user did not provide a brief. Invent a concise episode brief from the project story, previous episode, ending hook, and existing assets.",
       "Keep existing asset names and character identities consistent.",
       "Use Simplified Chinese for non-spoken production fields so the user can review and edit the episode efficiently.",
-      "Only dialogue[].text is spoken dialogue; write it in the project dialogue language and keep it concise for video voice generation."
+      "Only dialogue[].text is spoken dialogue; write it in the project dialogue language and keep it concise for video voice generation.",
+      "Do not put every possible idea into this episode. Select only the story beats that fit the target duration.",
+      "A 15s shot should carry one main story beat, 1-2 continuous actions, and 0-1 short dialogue line.",
+      "Put overflow events, future reveals, or extra conflicts into deferredBeats instead of forcing them into the current episode."
     ],
     schema: {
+      brief: "string",
       script: {
         title: "string",
         logline: "string",
@@ -1912,7 +1929,11 @@ function buildEpisodeScriptPrompt(config, state, episodeInfo = {}) {
             visualNotes: "string"
           }
         ]
-      }
+      },
+      selectedBeats: ["string"],
+      deferredBeats: ["string"],
+      capacityNote: "string",
+      sourceMode: "brief_guided | auto_continue"
     },
     project: {
       title: config.project.title,
@@ -1924,7 +1945,8 @@ function buildEpisodeScriptPrompt(config, state, episodeInfo = {}) {
       title: episodeInfo.title || `第 ${episodeInfo.order || 1} 集`,
       order: episodeInfo.order || 1,
       targetLength: config.project.videoLength || config.project.episodeDuration || "",
-      note: episodeInfo.note || ""
+      userBrief: episodeInfo.note || "",
+      sourceMode
     },
     previousEpisode: previousEpisode ? {
       title: previousEpisode.title,
@@ -1950,11 +1972,24 @@ async function generateEpisodeScriptContent(config, state, episodeInfo = {}) {
   }, result.source);
   script.title = episodeInfo.title || script.title;
   script.adapterError = result.error || "";
+  const sourceMode = stringOr(result.data?.sourceMode || result.data?.source_mode, episodeInfo.mode || (episodeInfo.note ? "brief_guided" : "auto_continue"));
   return {
     script,
+    brief: stringOr(result.data?.brief, episodeInfo.note || script.synopsis || ""),
+    selectedBeats: normalizeStringList(result.data?.selectedBeats || result.data?.selected_beats),
+    deferredBeats: normalizeStringList(result.data?.deferredBeats || result.data?.deferred_beats),
+    capacityNote: stringOr(result.data?.capacityNote || result.data?.capacity_note, ""),
+    sourceMode,
     source: result.source,
     adapterError: result.error || ""
   };
+}
+
+function normalizeStringList(values = []) {
+  return (Array.isArray(values) ? values : [])
+    .map((value) => stringOr(value, "").trim())
+    .filter(Boolean)
+    .slice(0, 20);
 }
 
 function compactAssetCatalog(cards = {}) {
@@ -2512,11 +2547,26 @@ function mockEpisodeScript(config, state, episodeInfo = {}) {
   const support = state.cards?.characters?.[1]?.name || "伙伴";
   const location = state.cards?.locations?.[0]?.name || "核心场景";
   const previousHook = previousEpisode?.script?.endingHook || previousEpisode?.synopsis || project.logline || "上一集的冲突尚未解决";
+  const mode = episodeInfo.mode || (episodeInfo.note ? "brief_guided" : "auto_continue");
+  const brief = episodeInfo.note || `${lead}延续上一集线索，在${location}发现新的阻碍，并在结尾遇到更大的危机。`;
   return {
+    brief,
+    selectedBeats: [
+      previousEpisode ? `承接上一集：${previousHook}` : "从项目主线进入本集开端",
+      `${lead}发现新的关键线索`,
+      `${lead}和${support}遭遇阻碍`,
+      "结尾抛出下一集钩子"
+    ],
+    deferredBeats: [
+      "更大的秘密暂不完全揭晓",
+      "最终对决延后到后续剧集"
+    ],
+    capacityNote: "本集保留 4 个主要剧情 beat，适合后续拆成 6-10 个 15s 分镜；复杂冲突延后。",
+    sourceMode: mode,
     script: {
       title: episodeInfo.title || `第 ${episodeInfo.order || 1} 集`,
       logline: `${lead}延续上一集线索，在${location}发现新的阻碍。`,
-      synopsis: `${previousHook}。本集${lead}和${support}继续追查关键线索，短暂取得突破，但结尾出现新的反转，为下一集留下钩子。`,
+      synopsis: `${brief} ${previousHook}。本集${lead}和${support}继续追查关键线索，短暂取得突破，但结尾出现新的反转，为下一集留下钩子。`,
       previousRecap: previousEpisode ? `承接${previousEpisode.title}：${previousEpisode.synopsis || previousEpisode.script?.synopsis || ""}` : "从项目主线开篇进入第一集。",
       episodeGoal: episodeInfo.note || "推进主线冲突，强化角色目标，并制造下一集悬念。",
       endingHook: "关键线索指向一个更大的秘密，主角发现自己也被卷入其中。",
@@ -4014,35 +4064,21 @@ async function createEpisode(payload = {}) {
   const [config, state] = await Promise.all([readConfig(), readState()]);
   const nextOrder = (state.episodes || []).reduce((max, episode) => Math.max(max, Number(episode.order || 0)), 0) + 1;
   const title = stringOr(payload.title, `第 ${nextOrder} 集`);
-  const scriptText = stringOr(payload.scriptText || payload.synopsis, "");
-  const generateMode = stringOr(payload.generateMode || payload.mode, scriptText ? "manual" : "blank");
-  const note = stringOr(payload.note || payload.episodeGoal, "");
-  let script = scriptText ? scriptFromUserText(title, scriptText, config) : null;
-  let source = script ? "manual" : "local";
-  let adapterError = "";
-  if (generateMode === "llm") {
-    const result = await generateEpisodeScriptContent(config, state, {
-      title,
-      order: nextOrder,
-      note
-    });
-    script = result.script;
-    source = result.source;
-    adapterError = result.adapterError || "";
-  }
+  const brief = stringOr(payload.brief || payload.note || payload.episodeGoal || payload.scriptText || payload.synopsis, "");
   const episode = createEpisodeRecord({
     title,
     order: nextOrder,
-    script,
-    synopsis: script?.synopsis || scriptText
+    script: null,
+    synopsis: "",
+    brief
   });
   state.episodes = [...(state.episodes || []), episode];
   state.activeEpisodeId = episode.id;
   touchState(state);
-  addEvent(state, "episode.created", `${episode.title} 已创建${script ? "并写入剧本" : ""}`, source, adapterError);
+  addEvent(state, "episode.created", `${episode.title} 已创建${brief ? "并保存故事意图" : ""}`, "local");
   await writeState(state);
   await syncActiveProject({ state });
-  return { ok: true, state, episode, source, adapterError };
+  return { ok: true, state, episode, source: "local", adapterError: "" };
 }
 
 async function openEpisode(episodeId) {
@@ -4104,7 +4140,16 @@ async function updateEpisodeScript(payload = {}) {
   const scriptText = stringOr(payload.scriptText || payload.synopsis, "");
   episode.title = title;
   episode.synopsis = scriptText;
+  episode.brief = scriptText;
+  episode.briefUpdatedAt = new Date().toISOString();
   episode.script = scriptText ? scriptFromUserText(title, scriptText, config) : null;
+  episode.scriptStatus = episode.script ? "structured" : "empty";
+  episode.scriptSourceMode = episode.script ? "manual" : "";
+  episode.selectedBeats = [];
+  episode.deferredBeats = [];
+  episode.capacityNote = "";
+  episode.scriptStructuredAt = episode.script ? new Date().toISOString() : "";
+  episode.scriptAdapterError = "";
   episode.shots = [];
   episode.promptPackages = [];
   episode.images = [];
@@ -4115,6 +4160,120 @@ async function updateEpisodeScript(payload = {}) {
   await writeState(state);
   await syncActiveProject({ state });
   return { ok: true, state, episode };
+}
+
+async function updateEpisodeBrief(payload = {}) {
+  const state = await readState();
+  const episodeId = payload.episodeId || state.activeEpisodeId;
+  const episode = state.episodes.find((item) => item.id === episodeId);
+  if (!episode) {
+    throw new Error("剧集不存在");
+  }
+  const brief = stringOr(payload.brief || payload.scriptText || payload.synopsis, "");
+  const previousBrief = stringOr(episode.brief || episode.synopsis, "");
+  const changed = normalizeTextForCompare(brief) !== normalizeTextForCompare(previousBrief);
+  episode.brief = brief;
+  episode.synopsis = brief;
+  episode.briefUpdatedAt = new Date().toISOString();
+  if (episode.script && changed) {
+    episode.scriptStatus = "stale";
+  } else if (episode.script) {
+    episode.scriptStatus = episode.scriptStatus || "structured";
+  } else {
+    episode.scriptStatus = brief ? "brief_saved" : "empty";
+  }
+  touchEpisode(episode);
+  touchState(state);
+  addEvent(state, "episode.brief.saved", `${episode.title} 故事意图已保存`, "local");
+  await writeState(state);
+  await syncActiveProject({ state });
+  return { ok: true, state, episode };
+}
+
+async function structureEpisodeScript(payload = {}) {
+  const [config, initialState] = await Promise.all([readConfig(), readState()]);
+  const episodeId = payload.episodeId || initialState.activeEpisodeId;
+  const episode = (initialState.episodes || []).find((item) => item.id === episodeId);
+  if (!episode) {
+    throw new Error("剧集不存在");
+  }
+  const scopeId = `episode-script:${episode.id}`;
+  const existing = await getRunningJobSnapshot("episode-script", scopeId);
+  if (existing) {
+    return { ok: true, state: existing.state, job: existing.job, duplicate: true };
+  }
+  const brief = stringOr(payload.brief ?? episode.brief ?? episode.synopsis, "");
+  const mode = brief ? "brief_guided" : "auto_continue";
+  const start = await markJobRunning("episode-script", scopeId, mode === "brief_guided" ? `${episode.title} 剧本完善中` : `${episode.title} 自动续写剧本中`);
+  if (start.duplicate) {
+    return { ok: true, state: start.state, job: start.job, duplicate: true };
+  }
+  try {
+    const response = await doStructureEpisodeScript(config, episodeId, brief, mode);
+    await markJobFinished("episode-script", scopeId, "succeeded", {
+      label: `${response.episode.title} 剧本已结构化`,
+      result: { source: response.source || "", mode }
+    });
+    return { ...response, state: await readState() };
+  } catch (error) {
+    await markJobFinished("episode-script", scopeId, "failed", {
+      label: `${episode.title} 剧本整理失败`,
+      error: publicError(error)
+    });
+    throw error;
+  }
+}
+
+async function doStructureEpisodeScript(config, episodeId, brief, mode) {
+  const state = await readState();
+  const episode = (state.episodes || []).find((item) => item.id === episodeId);
+  if (!episode) {
+    throw new Error("剧集不存在");
+  }
+  const result = await generateEpisodeScriptContent(config, state, {
+    title: episode.title,
+    order: episode.order,
+    note: brief,
+    mode,
+    episodeId: episode.id
+  });
+  const latestState = await withStateWriteLock(async () => {
+    const nextState = await readState();
+    const latestEpisode = (nextState.episodes || []).find((item) => item.id === episode.id);
+    if (!latestEpisode) {
+      throw new Error("剧集不存在");
+    }
+    const nextBrief = result.brief || brief || result.script?.synopsis || latestEpisode.brief || "";
+    latestEpisode.brief = nextBrief;
+    latestEpisode.synopsis = result.script?.synopsis || nextBrief;
+    latestEpisode.script = result.script;
+    latestEpisode.scriptStatus = "structured";
+    latestEpisode.scriptSourceMode = result.sourceMode || mode;
+    latestEpisode.selectedBeats = result.selectedBeats || [];
+    latestEpisode.deferredBeats = result.deferredBeats || [];
+    latestEpisode.capacityNote = result.capacityNote || "";
+    latestEpisode.scriptStructuredAt = new Date().toISOString();
+    latestEpisode.scriptAdapterError = result.adapterError || "";
+    latestEpisode.shots = [];
+    latestEpisode.promptPackages = [];
+    latestEpisode.images = [];
+    latestEpisode.videos = [];
+    touchEpisode(latestEpisode);
+    touchState(nextState);
+    addEvent(nextState, "episode.script.structured", `${latestEpisode.title} 剧本已生成/完善`, result.source || "llm", result.adapterError || "");
+    await writeState(nextState);
+    await syncActiveProject({ state: nextState });
+    return nextState;
+  });
+  const latestEpisode = (latestState.episodes || []).find((item) => item.id === episode.id);
+  return {
+    ok: true,
+    state: latestState,
+    episode: latestEpisode,
+    source: result.source,
+    adapterError: result.adapterError || "",
+    sourceMode: result.sourceMode || mode
+  };
 }
 
 async function uploadStyleImage(payload = {}) {
@@ -4871,12 +5030,24 @@ function normalizeEpisode(raw = {}, fallbackOrder = 1, fallbackScript = null) {
   const now = new Date().toISOString();
   const order = Number(raw.order || fallbackOrder || 1);
   const hasOwnScript = Object.prototype.hasOwnProperty.call(raw, "script");
+  const script = hasOwnScript ? raw.script : fallbackScript || null;
+  const brief = stringOr(raw.brief, raw.synopsis || script?.synopsis || "");
+  const scriptStatus = raw.scriptStatus || raw.script_status || inferEpisodeScriptStatus({ ...raw, brief, script });
   return {
     id: stringOr(raw.id, `EP${String(order).padStart(2, "0")}`),
     title: stringOr(raw.title, `第 ${order} 集`),
     order,
-    synopsis: stringOr(raw.synopsis, raw.script?.synopsis || fallbackScript?.synopsis || ""),
-    script: hasOwnScript ? raw.script : fallbackScript || null,
+    brief,
+    briefUpdatedAt: raw.briefUpdatedAt || raw.brief_updated_at || raw.updatedAt || raw.createdAt || now,
+    synopsis: stringOr(raw.synopsis, script?.synopsis || brief),
+    script,
+    scriptStatus,
+    selectedBeats: normalizeStringList(raw.selectedBeats || raw.selected_beats),
+    deferredBeats: normalizeStringList(raw.deferredBeats || raw.deferred_beats),
+    capacityNote: stringOr(raw.capacityNote || raw.capacity_note, ""),
+    scriptSourceMode: stringOr(raw.scriptSourceMode || raw.script_source_mode, script ? "manual" : ""),
+    scriptStructuredAt: stringOr(raw.scriptStructuredAt || raw.script_structured_at, script ? raw.updatedAt || raw.createdAt || now : ""),
+    scriptAdapterError: stringOr(raw.scriptAdapterError || raw.script_adapter_error, ""),
     shots: Array.isArray(raw.shots) ? raw.shots.map((shot) => ({
       ...shot,
       durationSec: 15,
@@ -4890,7 +5061,13 @@ function normalizeEpisode(raw = {}, fallbackOrder = 1, fallbackScript = null) {
   };
 }
 
-function createEpisodeRecord({ title, order, script, synopsis } = {}) {
+function inferEpisodeScriptStatus(episode = {}) {
+  if (episode.script) return episode.scriptStatus || episode.script_status || "structured";
+  if (episode.brief || episode.synopsis) return "brief_saved";
+  return "empty";
+}
+
+function createEpisodeRecord({ title, order, script, synopsis, brief = "" } = {}) {
   const now = new Date().toISOString();
   const episodeOrder = Number(order || 1);
   return normalizeEpisode({
@@ -4898,7 +5075,10 @@ function createEpisodeRecord({ title, order, script, synopsis } = {}) {
     title: title || `第 ${episodeOrder} 集`,
     order: episodeOrder,
     synopsis: synopsis || script?.synopsis || "",
+    brief,
     script,
+    scriptStatus: script ? "structured" : brief ? "brief_saved" : "empty",
+    scriptSourceMode: script ? "manual" : "",
     createdAt: now,
     updatedAt: now
   }, episodeOrder, script || null);
