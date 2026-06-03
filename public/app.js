@@ -2959,7 +2959,10 @@ function renderProjects() {
     ...projects.map((project) => `
       <article class="project-card" data-open-project="${escapeAttr(project.id)}">
         <div class="project-cover">
-          ${project.coverUrl ? `<img src="${escapeAttr(project.coverUrl)}" alt="${escapeAttr(project.title)}">` : `<div class="default-cover"><span>AI</span></div>`}
+          ${project.coverUrl ? `
+            <img class="project-cover-bg" src="${escapeAttr(project.coverUrl)}" alt="" aria-hidden="true">
+            <img class="project-cover-image" src="${escapeAttr(project.coverUrl)}" alt="${escapeAttr(project.title)}">
+          ` : `<div class="default-cover"><span>AI</span></div>`}
         </div>
         <div class="project-card-body">
           <div class="project-card-title">
