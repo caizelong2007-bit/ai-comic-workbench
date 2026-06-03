@@ -506,6 +506,23 @@
     </div>
   </div>
 
+  <div id="shotAssetPickerModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="shotAssetPickerTitle">
+    <div class="modal-card shot-asset-picker-modal-card">
+      <button id="closeShotAssetPickerBtn" class="modal-close" aria-label="关闭">×</button>
+      <div class="prompt-detail-head">
+        <div>
+          <p class="eyebrow">Shot References</p>
+          <h2 id="shotAssetPickerTitle">添加参考资产</h2>
+        </div>
+      </div>
+      <p class="muted-text">只添加到当前分镜参考列表，不会自动插入已生成的提示词正文。需要重新生成提示词或手动 @ 才会在文案中引用。</p>
+      <div id="shotAssetPickerGrid" class="shot-asset-picker-grid"></div>
+      <div class="modal-actions">
+        <button id="cancelShotAssetPickerBtn" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <div id="shotEditorModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="shotEditorTitle">
     <div class="modal-card shot-editor-modal-card">
       <button id="closeShotEditorBtn" class="modal-close" aria-label="关闭">×</button>
