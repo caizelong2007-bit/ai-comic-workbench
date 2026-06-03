@@ -1575,8 +1575,31 @@ function buildSeedanceVideoPrompt(config, pack = {}, shot = {}, assets = [], ass
     pack.soundDesign ? `分镜音效：\n${pack.soundDesign}` : "",
     audio.length ? `音效时间轴：\n${audio.map((row) => `${row.timeRange || ""} ${row.content || ""}${row.assetRefs?.length ? ` 关联资产：${row.assetRefs.map((id) => `@${id}`).join(" ")}` : ""}`.trim()).join("\n")}` : "",
     dialogue.length ? `分镜台词：\n${dialogue.map((row) => `${row.timeRange || ""} ${row.speakerAssetId ? `@${row.speakerAssetId}` : ""}${row.voice ? ` ${row.voice}` : ""}: ${row.text || ""}`.trim()).join("\n")}` : "",
+    buildSeedanceSpeechLanguageRule(config.project || {}, dialogue),
     "要求：严格保持参考图中的角色身份、场景布局、道具外观和项目风格；不要根据未绑定的文字描述重塑角色外观；不要新增未指定角色；不要生成字幕水印。"
   ].filter(Boolean).join("\n\n");
+}
+
+function buildSeedanceSpeechLanguageRule(project = {}, dialogue = []) {
+  const language = dialogueLanguageName(project.dialogueLanguage || project.language || "zh-CN");
+  if (!dialogue.length) {
+    return `语音语言规则：如需要生成角色语音或口播，必须使用项目对白语言：${language}。中文画面、镜头、动作、音效说明只作为制作指导，不是口播内容。`;
+  }
+  if ((project.dialogueLanguage || project.language || "zh-CN") === "zh-CN") {
+    return [
+      "语音语言规则：",
+      "所有角色说出口的台词必须严格使用项目对白语言：中文。",
+      "只朗读“分镜台词”区域中的台词文本；画面、镜头、动作、音效说明不是口播内容。"
+    ].join("\n");
+  }
+  return [
+    "Speech language rule:",
+    `All spoken dialogue and generated speech must be in ${language} only.`,
+    "Do not speak Chinese.",
+    `If any dialogue line is accidentally written in another language, express its meaning in ${language} instead of speaking the source language.`,
+    "Chinese text in this prompt is production guidance for visuals, camera, action, and sound design only. It is not narration and must not be spoken.",
+    "Only speak the dialogue lines listed in the Dialogue/分镜台词 section."
+  ].join("\n");
 }
 
 function buildSeedanceReferenceBindingBlock(references = []) {
@@ -1815,6 +1838,12 @@ function buildScriptPrompt(config) {
   return JSON.stringify({
     task: "create_script",
     requirement: "生成 4 场以内、适合短视频漫剧的结构化剧本 JSON。",
+    languagePolicy: promptLanguagePolicy(project),
+    rules: [
+      "非台词字段用于工作台审阅和制作校验，优先使用简体中文输出，包括 logline、synopsis、scene action、narration、visualNotes、mood、location 等。",
+      "dialogue[].text 是角色真正说出口的台词，必须严格使用项目对白语言；不要因为对白语言是英文/日文而把整份剧本说明改成英文/日文。",
+      "角色名、资产名、专有名词保持用户输入或既有命名，不要为了语言转换而改名。"
+    ],
     schema: {
       title: "string",
       logline: "string",
@@ -1851,12 +1880,15 @@ function buildEpisodeScriptPrompt(config, state, episodeInfo = {}) {
   return JSON.stringify({
     task: "create_episode_script",
     requirement: "根据项目总剧本和上一集内容，续写当前单集剧本，并返回结构化 JSON。保持故事连贯、角色状态连续、结尾有钩子，适合后续拆成 15s 分镜。",
+    languagePolicy: promptLanguagePolicy(config.project),
     rules: [
       "Return JSON only with shape { script: {...} }.",
       "Do not rewrite the whole project; write only the current episode.",
       "Use the inherited project video length as the target episode length.",
       "Continue from previousEpisode when present; otherwise start from the project opening.",
-      "Keep existing asset names and character identities consistent."
+      "Keep existing asset names and character identities consistent.",
+      "Use Simplified Chinese for non-spoken production fields so the user can review and edit the episode efficiently.",
+      "Only dialogue[].text is spoken dialogue; write it in the project dialogue language and keep it concise for video voice generation."
     ],
     schema: {
       script: {
@@ -1955,11 +1987,14 @@ function compactAssetCatalog(cards = {}) {
 function buildShotsPrompt(config, script, episode = {}) {
   return JSON.stringify({
     task: "create_15s_video_shots",
+    languagePolicy: promptLanguagePolicy(config.project),
     rules: [
       "Return JSON only with shape { shots: [...] }.",
       "Each shot is one complete 15-second video segment.",
       "Do not create storyboard images or first-frame prompts here.",
-      "Include camera, action, dialogue, continuity, and asset-relevant visual notes for later Seedance prompt packages."
+      "Include camera, action, dialogue, continuity, and asset-relevant visual notes for later Seedance prompt packages.",
+      "camera, action, assetNotes, visualNotes, and continuity are production guidance fields; prefer Simplified Chinese for easier user review.",
+      "dialogue is the only spoken text in the shot and must use the project dialogue language."
     ],
     requirement: "把剧本拆成 6-10 个 15s 视频分镜，用于后续生成 Seedance 分镜提示词包。不要输出故事板图或首帧图提示词。输出 JSON: { shots: [...] }。",
     shotSchema: {
@@ -2040,6 +2075,7 @@ function buildCardsPrompt(config, script, shots, existingCards = {}, assetImages
 function buildPromptPackagesPrompt(config, shots, cards, assetImages, episode = {}) {
   return JSON.stringify({
     task: "generate_15s_shot_prompt_packages_for_seedance",
+    languagePolicy: promptLanguagePolicy(config.project),
     outputRules: [
       "Return JSON only. Do not return Markdown.",
       "Output shape must be { promptPackages: [...] }.",
@@ -2049,7 +2085,11 @@ function buildPromptPackagesPrompt(config, shots, cards, assetImages, episode = 
       "When availableAssets contains imageUrl, write the seedancePrompt so the video adapter can pair each asset id with its reference image.",
       "For a 15s shot, prefer time ranges: 0.0-3.0, 3.0-7.0, 7.0-10.0, 10.0-15.0.",
       "Keep continuity of character identity, prop positions, scene layout, human scale, and visual style.",
-      "Do not create storyboard images or first-frame image prompts."
+      "Do not create storyboard images or first-frame image prompts.",
+      "soundDesign, audio.content, cameraLanguage, blocking, composition, and action are production guidance fields; prefer Simplified Chinese for user review.",
+      "dialogue[].text is spoken dialogue and must strictly use the project dialogue language.",
+      "dialogue[].voice must explicitly mention the project dialogue language or accent, for example natural English voice when the language is English.",
+      "Chinese production guidance is not spoken dialogue; do not place visual instructions inside dialogue[].text."
     ],
     packageSchema: {
       id: "PKG-SH01",
@@ -2354,6 +2394,30 @@ function projectAttributes(project = {}) {
     videoLength: project.videoLength || project.episodeDuration || "",
     subtitles: project.subtitles || "on",
     dialogueLanguage: project.dialogueLanguage || project.language || "zh-CN"
+  };
+}
+
+function dialogueLanguageName(value = "zh-CN") {
+  return {
+    "zh-CN": "Chinese",
+    en: "English",
+    ja: "Japanese"
+  }[value] || value || "Chinese";
+}
+
+function promptLanguagePolicy(project = {}) {
+  const code = project.dialogueLanguage || project.language || "zh-CN";
+  const language = dialogueLanguageName(code);
+  return {
+    workspaceReviewLanguage: "Simplified Chinese for non-spoken production guidance fields",
+    spokenDialogueLanguage: language,
+    dialogueLanguageCode: code,
+    rules: [
+      "The project dialogue language controls only spoken dialogue, generated speech, and voice/accent guidance.",
+      "Visual descriptions, script summaries, shot actions, camera instructions, sound design, asset notes, and continuity notes may remain in Simplified Chinese for user review.",
+      `All fields that represent spoken character lines must be written in ${language}.`,
+      "Do not translate character names, asset ids, or @asset references unless the user has explicitly named them that way."
+    ]
   };
 }
 

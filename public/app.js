@@ -2303,8 +2303,32 @@ function buildFinalSeedancePrompt(pack = {}, shot = {}, assets = [], audio = [],
     pack.soundDesign ? `分镜音效：\n${pack.soundDesign}` : "",
     audio.length ? `音效时间轴：\n${audio.map((row) => `${row.timeRange || ""} ${row.content || ""}${row.assetRefs?.length ? ` 关联资产：${row.assetRefs.map((id) => `@${id}`).join(" ")}` : ""}`.trim()).join("\n")}` : "",
     dialogue.length ? `分镜台词：\n${dialogue.map((row) => `${row.timeRange || ""} ${row.speakerAssetId ? `@${row.speakerAssetId}` : row.speaker ? `@${row.speaker}` : ""}${row.voice ? ` ${row.voice}` : ""}: ${row.text || ""}`.trim()).join("\n")}` : "",
+    buildSeedanceSpeechLanguageRuleForClient(current.config?.project || {}, dialogue),
     "要求：严格保持参考图中的角色身份、场景布局、道具外观和项目风格；不要根据未绑定的文字描述重塑角色外观；不要新增未指定角色；不要生成字幕水印。"
   ].filter(Boolean).join("\n\n");
+}
+
+function buildSeedanceSpeechLanguageRuleForClient(project = {}, dialogue = []) {
+  const code = project.dialogueLanguage || project.language || "zh-CN";
+  const language = dialogueLanguageNameForPrompt(code);
+  if (!dialogue.length) {
+    return `语音语言规则：如需要生成角色语音或口播，必须使用项目对白语言：${language}。中文画面、镜头、动作、音效说明只作为制作指导，不是口播内容。`;
+  }
+  if (code === "zh-CN") {
+    return [
+      "语音语言规则：",
+      "所有角色说出口的台词必须严格使用项目对白语言：中文。",
+      "只朗读“分镜台词”区域中的台词文本；画面、镜头、动作、音效说明不是口播内容。"
+    ].join("\n");
+  }
+  return [
+    "Speech language rule:",
+    `All spoken dialogue and generated speech must be in ${language} only.`,
+    "Do not speak Chinese.",
+    `If any dialogue line is accidentally written in another language, express its meaning in ${language} instead of speaking the source language.`,
+    "Chinese text in this prompt is production guidance for visuals, camera, action, and sound design only. It is not narration and must not be spoken.",
+    "Only speak the dialogue lines listed in the Dialogue/分镜台词 section."
+  ].join("\n");
 }
 
 function downloadJson(payload, fileName) {
@@ -3879,6 +3903,14 @@ function languageName(value) {
     en: "英文",
     ja: "日文"
   }[value] || value || "未设置";
+}
+
+function dialogueLanguageNameForPrompt(value) {
+  return {
+    "zh-CN": "Chinese",
+    en: "English",
+    ja: "Japanese"
+  }[value] || value || "Chinese";
 }
 
 function setText(id, text) {
