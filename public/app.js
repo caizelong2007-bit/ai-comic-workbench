@@ -24,6 +24,103 @@ const viewMeta = {
 const defaultStyleImage = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 160'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%23f4edff'/%3E%3Cstop offset='1' stop-color='%23dff6f2'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='120' height='160' rx='12' fill='url(%23g)'/%3E%3Ccircle cx='36' cy='42' r='18' fill='%238f64df' opacity='.28'/%3E%3Cpath d='M24 118 54 78l18 24 12-15 20 31z' fill='%230f8b8d' opacity='.35'/%3E%3C/svg%3E";
 const maxUploadImageBytes = 15 * 1024 * 1024;
 const maxPromptReferenceAssets = 6;
+const builtinStylePresets = [
+  {
+    id: "preset-benson-ue5",
+    name: "本森UE5渲染",
+    prompt: "Unreal Engine 5 cinematic 3D render, realistic stylized voxel/blocky game character look, PBR materials, ray-traced lighting, soft rim light, high-detail environment finish, crisp readable silhouettes, no LEGO plastic texture."
+  },
+  {
+    id: "preset-painterly-cinematic-3d",
+    imageUrl: "/assets/style-presets/preset-painterly-cinematic-3d.png",
+    name: "双城之战",
+    prompt: "Painterly stylized 3D animation look, dramatic cinematic lighting, hand-painted texture feeling, sharp silhouettes, high contrast shadows, moody urban fantasy color palette, expressive faces, premium animated series finish."
+  },
+  {
+    id: "preset-aaa-game-cg",
+    imageUrl: "/assets/style-presets/preset-aaa-game-cg.png",
+    name: "游戏CG",
+    prompt: "AAA game cinematic CG, realistic 3D characters, detailed fabric and material shaders, physically based rendering, volumetric light, shallow depth of field, high production value, cinematic composition."
+  },
+  {
+    id: "preset-wilderness-game",
+    imageUrl: "/assets/style-presets/preset-wilderness-game.png",
+    name: "荒野游戏",
+    prompt: "Rugged survival adventure game realism, earthy natural palette, weathered clothes and props, outdoor wilderness lighting, realistic leather, wood and metal materials, grounded cinematic atmosphere."
+  },
+  {
+    id: "preset-premium-family-3d",
+    imageUrl: "/assets/style-presets/preset-premium-family-3d.png",
+    name: "皮克斯",
+    prompt: "Family-friendly premium 3D animated film look, rounded appealing character shapes, expressive faces, soft subsurface skin, polished materials, warm cinematic lighting, colorful optimistic palette."
+  },
+  {
+    id: "preset-2d-webtoon-drama",
+    imageUrl: "/assets/style-presets/preset-2d-webtoon-drama.png",
+    name: "2D漫剧",
+    prompt: "Clean 2D webtoon drama style, delicate line art, soft cel shading, expressive faces, modern romantic color palette, readable cinematic panels, polished digital illustration finish."
+  },
+  {
+    id: "preset-warm-hand-drawn-anime",
+    imageUrl: "/assets/style-presets/preset-warm-hand-drawn-anime.png",
+    name: "吉卜力",
+    prompt: "Warm hand-drawn Japanese animation feeling, watercolor backgrounds, soft linework, nostalgic atmosphere, gentle natural light, painterly foliage and clouds, calm storybook emotion."
+  },
+  {
+    id: "preset-bold-fashion-manga",
+    imageUrl: "/assets/style-presets/preset-bold-fashion-manga.png",
+    name: "JOJO",
+    prompt: "High-contrast heroic manga style, bold ink outlines, dramatic poses, angular anatomy, saturated colors, graphic shadows, fashion-forward character design, intense stylized expression."
+  },
+  {
+    id: "preset-3d-chinese-fantasy",
+    imageUrl: "/assets/style-presets/preset-3d-chinese-fantasy.png",
+    name: "3D国漫",
+    prompt: "Chinese fantasy 3D animation, elegant costume details, polished skin shader, flowing cloth and hair, cinematic mist, ornate environment finish, jade and gold accents, graceful heroic tone."
+  },
+  {
+    id: "preset-crisp-pixel-art",
+    imageUrl: "/assets/style-presets/preset-crisp-pixel-art.png",
+    name: "像素",
+    prompt: "High-resolution pixel art game style, crisp pixel edges, limited color palette, retro game composition, readable silhouettes, no painterly blur, clean sprite-like detail."
+  },
+  {
+    id: "preset-soft-plush",
+    imageUrl: "/assets/style-presets/preset-soft-plush.png",
+    name: "毛绒质感",
+    prompt: "Soft plush toy material, visible fabric fibers, felt seams, rounded forms, cozy lighting, tactile handcrafted look, gentle shadows, warm and friendly texture."
+  },
+  {
+    id: "preset-clay-stop-motion",
+    imageUrl: "/assets/style-presets/preset-clay-stop-motion.png",
+    name: "粘土风",
+    prompt: "Stop-motion clay animation style, handmade clay texture, visible fingerprints, rounded forms, miniature set lighting, playful imperfect craft, tactile sculpted surface."
+  },
+  {
+    id: "preset-ink-wash",
+    imageUrl: "/assets/style-presets/preset-ink-wash.png",
+    name: "水墨风",
+    prompt: "Chinese ink wash painting style, xuan paper texture, expressive black ink strokes, light watercolor accents, negative space, misty atmosphere, elegant traditional composition."
+  },
+  {
+    id: "preset-colored-pencil",
+    imageUrl: "/assets/style-presets/preset-colored-pencil.png",
+    name: "彩铅",
+    prompt: "Colored pencil illustration, visible pencil strokes, paper grain texture, soft layered colors, gentle outlines, handmade storybook feeling, delicate shading."
+  },
+  {
+    id: "preset-flat-2d",
+    imageUrl: "/assets/style-presets/preset-flat-2d.png",
+    name: "2D平涂",
+    prompt: "Clean 2D flat illustration, vector-like shapes, simple cel shading, bright color blocks, minimal texture, strong silhouettes, modern graphic design finish."
+  },
+  {
+    id: "preset-live-action",
+    imageUrl: "/assets/style-presets/preset-live-action.png",
+    name: "真人",
+    prompt: "Live-action realistic cinematography, real human proportions, natural skin and fabric, practical location lighting, shallow depth of field, cinematic realism, grounded camera language."
+  }
+].map((preset) => ({ imageUrl: "", ...preset }));
 
 const els = {};
 let current = {
@@ -1574,6 +1671,12 @@ async function addProjectStyle(event) {
 }
 
 function handleStyleCardsClick(event) {
+  const applyPresetButton = event.target.closest("[data-apply-style-preset]");
+  if (applyPresetButton) {
+    event.stopPropagation();
+    applyBuiltinStylePreset(applyPresetButton.dataset.applyStylePreset);
+    return;
+  }
   const deleteButton = event.target.closest("[data-delete-style]");
   if (deleteButton) {
     event.stopPropagation();
@@ -1596,6 +1699,25 @@ function handleStyleCardsClick(event) {
     if (style) selectStyle(style);
     return;
   }
+}
+
+async function applyBuiltinStylePreset(presetId = "") {
+  const preset = builtinStylePresets.find((item) => item.id === presetId);
+  if (!preset) {
+    toast("没有找到内置风格模板");
+    return;
+  }
+  const styles = currentProjectStyleOptions();
+  const existing = styles.find((style) => style.id === preset.id);
+  const nextStyle = normalizeStyle({
+    id: preset.id,
+    name: preset.name,
+    imageUrl: existing?.imageUrl || preset.imageUrl || "",
+    prompt: existing?.prompt || preset.prompt
+  });
+  setProjectStyles([...styles.filter((style) => style.id !== existing?.id && style.id !== nextStyle.id), nextStyle]);
+  await selectStyle(nextStyle, { silent: true });
+  toast(existing ? `${preset.name} 已应用` : `${preset.name} 已添加并应用`);
 }
 
 async function selectStyle(style, options = {}) {
@@ -2848,6 +2970,7 @@ function selectedModelConfig(selectionKey, fallbackType = "llm") {
 
 function renderStyleCards() {
   if (!els.styleCards) return;
+  const rowScrollPositions = [...els.styleCards.querySelectorAll(".style-card-row")].map((row) => row.scrollLeft);
   const project = current.config?.project || {};
   const styles = projectStyleOptions({
     ...project,
@@ -2856,27 +2979,60 @@ function renderStyleCards() {
     visualStyle: els.configForm?.elements.visualStyle?.value || project.visualStyle
   });
   const selected = activeStyleId() || inferActiveStyleId({ ...project, projectStyles: styles, visualStyle: els.configForm?.elements.visualStyle?.value || project.visualStyle });
-  els.styleCards.innerHTML = [
-    `<button class="style-add-card" type="button" data-add-style="true">
-      <div class="add-mark">＋</div>
-      <strong>添加风格</strong>
-      <small>上传参考图并填写提示词</small>
-    </button>`,
-    ...styles.map((style) => `
-      <button class="style-ref-card ${style.id === selected ? "is-selected" : ""}" type="button" data-style-id="${escapeAttr(style.id)}">
-        <span class="style-thumb">${style.imageUrl ? `<img src="${escapeAttr(style.imageUrl)}" alt="${escapeAttr(style.name)}">` : `<img src="${defaultStyleImage}" alt="">`}</span>
-        <strong>${escapeHtml(style.name)}</strong>
-        <small>${escapeHtml(style.prompt)}</small>
-        <span class="style-actions">
-          <span>${style.id === selected ? "已选" : "选择"}</span>
-          <span>
-            <span data-edit-style="${escapeAttr(style.id)}">编辑</span>
-            <span data-delete-style="${escapeAttr(style.id)}">删除</span>
-          </span>
+  const customStyles = styles.filter((style) => !isBuiltinStylePreset(style));
+  els.styleCards.innerHTML = `
+    <div class="style-lane">
+      <div class="style-lane-head">
+        <strong>项目风格</strong>
+        <small>添加风格排在前方，内置风格可直接选用</small>
+      </div>
+      <div class="style-card-row">
+        <button class="style-add-card" type="button" data-add-style="true">
+          <div class="add-mark">＋</div>
+          <strong>添加风格</strong>
+          <small>上传参考图并填写提示词</small>
+        </button>
+        ${customStyles.map((style) => renderCustomStyleCard(style, selected)).join("")}
+        ${builtinStylePresets.map((preset) => renderBuiltinStylePresetCard(preset, styles, selected)).join("")}
+      </div>
+    </div>
+  `;
+  els.styleCards.querySelectorAll(".style-card-row").forEach((row, index) => {
+    row.scrollLeft = rowScrollPositions[index] || 0;
+  });
+}
+
+function renderCustomStyleCard(style = {}, selected = "") {
+  return `
+    <button class="style-ref-card ${style.id === selected ? "is-selected" : ""}" type="button" data-style-id="${escapeAttr(style.id)}">
+      <span class="style-thumb">${style.imageUrl ? `<img src="${escapeAttr(style.imageUrl)}" alt="${escapeAttr(style.name)}">` : `<img src="${defaultStyleImage}" alt="">`}</span>
+      <strong>${escapeHtml(style.name)}</strong>
+      <small>${escapeHtml(style.prompt)}</small>
+      <span class="style-actions">
+        <span>${style.id === selected ? "已选" : "选择"}</span>
+        <span>
+          <span data-edit-style="${escapeAttr(style.id)}">编辑</span>
+          <span data-delete-style="${escapeAttr(style.id)}">删除</span>
         </span>
-      </button>
-    `)
-  ].join("");
+      </span>
+    </button>
+  `;
+}
+
+function renderBuiltinStylePresetCard(preset = {}, styles = [], selected = "") {
+  const existing = styles.find((style) => style.id === preset.id);
+  const isSelected = existing?.id === selected;
+  return `
+    <button class="style-ref-card style-preset-card ${isSelected ? "is-selected" : ""}" type="button" data-apply-style-preset="${escapeAttr(preset.id)}">
+      <span class="style-thumb">${preset.imageUrl ? `<img src="${escapeAttr(preset.imageUrl)}" alt="${escapeAttr(preset.name)}">` : `<img src="${defaultStyleImage}" alt="">`}</span>
+      <strong>${escapeHtml(preset.name)}</strong>
+      <small>${escapeHtml(preset.prompt)}</small>
+    </button>
+  `;
+}
+
+function isBuiltinStylePreset(style = {}) {
+  return builtinStylePresets.some((preset) => preset.id === style.id);
 }
 
 function updateParamSelections() {

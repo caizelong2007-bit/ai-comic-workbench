@@ -2377,7 +2377,7 @@ async function imageReferenceToDataUrl(imageUrl = "") {
   if (!value) return "";
   if (value.startsWith("data:image/")) return value;
   if (/^https?:\/\//i.test(value)) return "";
-  const localPath = localCachePathFromUrl(value);
+  const localPath = localImagePathFromUrl(value);
   if (!localPath) return "";
   try {
     const bytes = await fs.readFile(localPath);
@@ -2396,6 +2396,19 @@ function localCachePathFromUrl(url = "") {
   const fullPath = path.resolve(CACHE_DIR, relative);
   const cacheRoot = path.resolve(CACHE_DIR);
   return fullPath.startsWith(cacheRoot) ? fullPath : "";
+}
+
+function localPublicAssetPathFromUrl(url = "") {
+  const normalized = String(url || "").replace(/\\/g, "/");
+  if (!normalized.startsWith("/assets/")) return "";
+  const relative = normalized.slice(1);
+  const fullPath = path.resolve(PUBLIC_DIR, relative);
+  const publicRoot = path.resolve(PUBLIC_DIR);
+  return fullPath.startsWith(publicRoot) ? fullPath : "";
+}
+
+function localImagePathFromUrl(url = "") {
+  return localCachePathFromUrl(url) || localPublicAssetPathFromUrl(url);
 }
 
 function mimeTypeForImagePath(filePath = "") {
