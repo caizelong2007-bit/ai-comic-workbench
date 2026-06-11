@@ -749,7 +749,7 @@ function hasPendingVideoTasks() {
 
 function isPendingVideoTask(video = {}) {
   const status = String(video.status || "").toLowerCase();
-  return Boolean(video.taskId) && !["completed", "failed", "cancelled"].includes(status);
+  return Boolean(video.taskId) && !["completed", "failed", "cancelled", "runway-submitted", "runway-external"].includes(status);
 }
 
 function scheduleVideoTaskPolling() {
@@ -2097,19 +2097,21 @@ async function runVideoClipsForCurrentEpisode() {
     const data = await api.post("/api/generate/videos", { episodeId: episode.id });
     applyServerData(data);
     render();
-    setActiveView("shot-editing");
+    if (!isRunwayBridgeSelected()) {
+      setActiveView("shot-editing");
+    }
     if (data.duplicate) {
-      toast("视频片段正在提交中，请稍后刷新");
+      toast(isRunwayBridgeSelected() ? "Runway Bridge 任务正在队列中，请保持 Bridge Worker 窗口打开" : "视频片段正在提交中，请稍后刷新");
       return "keep-running";
     }
-    toast(`Seedance 视频任务已提交：${data.outputs?.length || 0} 个`);
+    toast(videoSubmissionToast(data.outputs?.length || 0));
   }, "视频片段生成失败");
 }
 
 async function refreshVideoTasks() {
   const hasAnyTask = (current.state?.episodes || []).some((episode) => (episode.videos || []).some((video) => video.taskId));
   if (!hasAnyTask) {
-    toast("暂无可刷新的 Seedance 任务");
+    toast(isRunwayBridgeSelected() ? "暂无可刷新的视频任务；Runway Bridge 提交后需在 Runway 页面查看结果" : "暂无可刷新的 Seedance 任务");
     return;
   }
   await withBusy("video-task:refresh", async () => {
@@ -2117,7 +2119,7 @@ async function refreshVideoTasks() {
     applyServerData(data);
     render();
     setActiveView("shot-editing");
-    toast(`已刷新 ${data.outputs?.length || 0} 个视频任务`);
+    toast(isRunwayBridgeSelected() ? "已刷新桥接任务状态；已提交 Runway 的任务不会自动回传视频文件" : `已刷新 ${data.outputs?.length || 0} 个视频任务`);
   }, "刷新视频任务失败");
 }
 
@@ -2129,12 +2131,14 @@ async function runVideoClip(shotId) {
     const data = await api.post("/api/generate/videos", { episodeId: episode.id, shotIds: [shotId] });
     applyServerData(data);
     render();
-    setActiveView("shot-editing");
+    if (!isRunwayBridgeSelected()) {
+      setActiveView("shot-editing");
+    }
     if (data.duplicate) {
-      toast(`${shotId} 视频片段正在提交中`);
+      toast(isRunwayBridgeSelected() ? `${shotId} Runway Bridge 任务正在队列中，请保持 Bridge Worker 窗口打开` : `${shotId} 视频片段正在提交中`);
       return "keep-running";
     }
-    toast(`${shotId} 视频任务已提交`);
+    toast(videoSubmissionToast(1, shotId));
   }, `${shotId} 视频片段生成失败`);
 }
 
@@ -2780,7 +2784,7 @@ function updateAvailability() {
   }
   setButtonLoading(els.genVideosBtn, "videos", !hasEpisode || !(getActiveEpisode()?.shots || []).length || relatedJobRunning(stageJobKey("videos")));
   setStandaloneButtonLoading(els.genVideoClipsBtn, "video-clip:video-clips", !hasEpisode || !(getActiveEpisode()?.promptPackages || []).length || relatedJobRunning("video-clip:video-clips"), "生成中...");
-  const pendingVideos = (getActiveEpisode()?.videos || []).filter((video) => video.taskId && !["completed", "failed", "cancelled"].includes(String(video.status || "").toLowerCase())).length;
+  const pendingVideos = (getActiveEpisode()?.videos || []).filter((video) => video.taskId && !["completed", "failed", "cancelled", "runway-submitted", "runway-external"].includes(String(video.status || "").toLowerCase())).length;
   setStandaloneButtonLoading(els.refreshVideoTasksBtn, "video-task:refresh", !pendingVideos || relatedJobRunning("video-task:refresh"), "刷新中...");
   if (els.exportPromptPackagesBtn) {
     const packageCount = getActiveEpisode()?.promptPackages?.length || 0;
@@ -3359,25 +3363,29 @@ function renderShotVideoPanel(shot = {}, pack = null, video = {}) {
   const promptStale = promptPackageIsStale(pack);
   const stale = videoIsStale(video, pack);
   const status = video.status || (video.taskId ? "submitted" : "not-started");
-  const pending = video.taskId && !["completed", "failed", "cancelled"].includes(String(status).toLowerCase());
+  const pending = video.taskId && !["completed", "failed", "cancelled", "runway-submitted", "runway-external"].includes(String(status).toLowerCase());
+  const externalSubmitted = ["runway-submitted", "runway-external"].includes(String(status).toLowerCase());
+  const runwayBridge = isRunwayBridgeVideo(video);
   const locked = !pack || promptStale || running || relatedJobRunning(jobKey);
-  const buttonText = running ? "提交中..." : promptStale ? "先重新生成提示词" : stale ? "按新提示重新生成" : video.taskId ? "重新生成" : "生成视频";
+  const buttonText = running ? videoSubmitLoadingText() : promptStale ? "先重新生成提示词" : stale ? "按新提示重新生成" : video.taskId ? "重新生成" : "生成视频";
+  const runwayBridgeStatus = runwayBridge ? renderRunwayBridgeStatus(video, "small") : "";
   const panel = video.url
     ? `<video class="shot-video-preview" src="${escapeAttr(video.url)}" controls preload="metadata"></video>`
     : video.thumbnailUrl
       ? `<img class="shot-video-preview" src="${escapeAttr(video.thumbnailUrl)}" alt="${escapeAttr(shotId)}">`
-      : `<div class="pending-panel ${pending || running ? "is-live" : ""}">${pending || running ? `<span class="spinner"></span><strong>${escapeHtml(videoStatusText(status))}</strong>` : pack ? "待生成" : "先生成提示词"}</div>`;
+      : `<div class="pending-panel ${pending || running ? "is-live" : ""}">${pending || running ? `<span class="spinner"></span><strong>${escapeHtml(videoStatusText(status, video))}</strong>` : externalSubmitted ? `<strong>${escapeHtml(videoStatusText(status, video))}</strong>` : pack ? "待生成" : "先生成提示词"}</div>`;
   return `
     ${panel}
     <div class="shot-video-meta">
-      <span class="video-status ${escapeAttr(stale ? "stale" : videoStatusTone(status))}">${escapeHtml(stale ? "提示词已更新" : videoStatusText(status))}${!stale && video.progress != null ? ` ${escapeHtml(video.progress)}%` : ""}</span>
+      <span class="video-status ${escapeAttr(stale ? "stale" : videoStatusTone(status))}">${escapeHtml(stale ? "提示词已更新" : videoStatusText(status, video))}${!stale && video.progress != null ? ` ${escapeHtml(video.progress)}%` : ""}</span>
       ${promptStale ? `<small class="warning-text">分镜脚本已更新，请先重新生成 Seedance 提示词。</small>` : ""}
       ${stale ? `<small class="warning-text">当前视频早于最新提示词包，请重新生成视频。</small>` : ""}
+      ${runwayBridgeStatus}
       ${video.taskId ? `<small>${escapeHtml(video.taskId)}</small>` : ""}
       ${video.adapterError ? `<small class="error-box">${escapeHtml(video.adapterError)}</small>` : ""}
     </div>
     <div class="prompt-action-row">
-      <button class="pipeline-action" type="button" data-generate-video-clip="${escapeAttr(shotId)}" data-job-key="${escapeAttr(jobKey)}" data-idle-text="${escapeAttr(buttonText)}" data-loading-text="提交中..." ${locked ? "disabled" : ""}>${escapeHtml(buttonText)}</button>
+      <button class="pipeline-action" type="button" data-generate-video-clip="${escapeAttr(shotId)}" data-job-key="${escapeAttr(jobKey)}" data-idle-text="${escapeAttr(buttonText)}" data-loading-text="${escapeAttr(videoSubmitLoadingText())}" ${locked ? "disabled" : ""}>${escapeHtml(buttonText)}</button>
       ${pending ? `<button class="pipeline-action secondary-action" type="button" data-refresh-video-task>刷新</button>` : ""}
     </div>
   `;
@@ -3888,20 +3896,23 @@ function renderVideoClipCard(pack = {}, shot = {}, video = {}) {
   const status = video.status || (video.taskId ? "submitted" : "not-started");
   const promptStale = promptPackageIsStale(pack);
   const stale = videoIsStale(video, pack);
-  const pending = video.taskId && !["completed", "failed", "cancelled"].includes(String(status).toLowerCase());
+  const pending = video.taskId && !["completed", "failed", "cancelled", "runway-submitted", "runway-external"].includes(String(status).toLowerCase());
+  const externalSubmitted = ["runway-submitted", "runway-external"].includes(String(status).toLowerCase());
+  const runwayBridge = isRunwayBridgeVideo(video);
   const jobKey = `video-clip:${pack.shotId || shot.id || pack.id}`;
   const disabled = promptStale || isJobRunning(jobKey);
-  const buttonText = isJobRunning(jobKey) ? "提交中..." : promptStale ? "先重新生成提示词" : stale ? "按新提示重新提交" : video.taskId ? "重新提交" : "生成此片段";
+  const buttonText = isJobRunning(jobKey) ? videoSubmitLoadingText() : promptStale ? "先重新生成提示词" : stale ? "按新提示重新提交" : video.taskId ? "重新提交" : "生成此片段";
   const refs = video.referenceImages?.length ? video.referenceImages : (pack.assetReferences || []).map((asset) => ({
     id: asset.id,
     name: asset.name,
     type: asset.type,
     url: asset.imageUrl
   }));
+  const runwayBridgeStatus = runwayBridge ? renderRunwayBridgeStatus(video, "card") : "";
   return `
     <article class="video-clip-card ${pending ? "is-pending" : ""}">
       <div class="video-clip-preview">
-            ${video.url ? `<video src="${escapeAttr(video.url)}" controls preload="metadata"></video>` : video.thumbnailUrl ? `<img src="${escapeAttr(video.thumbnailUrl)}" alt="${escapeAttr(pack.shotId || shot.id || "video")}">` : `<div class="video-placeholder">${pending ? `<span class="spinner"></span><strong>生成中</strong>` : "未生成"}</div>`}
+            ${video.url ? `<video src="${escapeAttr(video.url)}" controls preload="metadata"></video>` : video.thumbnailUrl ? `<img src="${escapeAttr(video.thumbnailUrl)}" alt="${escapeAttr(pack.shotId || shot.id || "video")}">` : `<div class="video-placeholder">${pending ? `<span class="spinner"></span><strong>${escapeHtml(videoStatusText(status, video))}</strong>` : externalSubmitted ? `<strong>${escapeHtml(videoStatusText(status, video))}</strong>` : "未生成"}</div>`}
       </div>
       <div class="video-clip-body">
         <div class="video-clip-title">
@@ -3909,16 +3920,17 @@ function renderVideoClipCard(pack = {}, shot = {}, video = {}) {
             <span class="tag">${escapeHtml(pack.shotId || shot.id || "")}</span>
             <h4>${escapeHtml(pack.title || shot.action || "视频片段")}</h4>
           </div>
-          <span class="video-status ${escapeAttr(stale ? "stale" : videoStatusTone(status))}">${escapeHtml(stale ? "提示词已更新" : videoStatusText(status))}${!stale && video.progress != null ? ` ${escapeHtml(video.progress)}%` : ""}</span>
+          <span class="video-status ${escapeAttr(stale ? "stale" : videoStatusTone(status))}">${escapeHtml(stale ? "提示词已更新" : videoStatusText(status, video))}${!stale && video.progress != null ? ` ${escapeHtml(video.progress)}%` : ""}</span>
         </div>
         <p>${escapeHtml(clipText(video.prompt || pack.seedancePrompt || shot.action || "", 220))}</p>
         ${promptStale ? `<p class="warning-text">分镜脚本已更新，请先回到分镜制作重新生成 Seedance 提示词。</p>` : ""}
         ${stale ? `<p class="warning-text">当前视频早于最新提示词包，请重新生成视频。</p>` : ""}
+        ${runwayBridgeStatus}
         ${video.taskId ? `<small class="task-id">task_id: ${escapeHtml(video.taskId)}</small>` : ""}
         ${video.adapterError ? `<p class="error-box">${escapeHtml(video.adapterError)}</p>` : ""}
         ${refs.length ? `<div class="video-ref-strip">${refs.map((asset) => `<span>${asset.url ? `<img src="${escapeAttr(asset.url)}" alt="${escapeAttr(asset.name || asset.id)}">` : ""}<b>@${escapeHtml(asset.id || "")}</b>${escapeHtml(asset.name || "")}</span>`).join("")}</div>` : ""}
         <div class="button-row prompt-export-row">
-          <button type="button" data-generate-video-clip="${escapeAttr(pack.shotId || shot.id || "")}" data-job-key="${escapeAttr(jobKey)}" data-idle-text="${escapeAttr(buttonText)}" data-loading-text="提交中..." ${disabled ? "disabled" : ""}>${escapeHtml(buttonText)}</button>
+          <button type="button" data-generate-video-clip="${escapeAttr(pack.shotId || shot.id || "")}" data-job-key="${escapeAttr(jobKey)}" data-idle-text="${escapeAttr(buttonText)}" data-loading-text="${escapeAttr(videoSubmitLoadingText())}" ${disabled ? "disabled" : ""}>${escapeHtml(buttonText)}</button>
           ${pending ? `<button type="button" data-refresh-video-task>刷新状态</button>` : ""}
           <button type="button" data-copy-prompt="${escapeAttr(pack.id || "")}">复制提示词包</button>
         </div>
@@ -3927,13 +3939,35 @@ function renderVideoClipCard(pack = {}, shot = {}, video = {}) {
   `;
 }
 
-function videoStatusText(status = "") {
+function videoStatusText(status = "", video = {}) {
   const value = String(status || "").toLowerCase();
+  const runwayBridge = isRunwayBridgeVideo(video);
+  if (runwayBridge) {
+    return {
+      "not-started": "未创建桥接任务",
+      queued: "等待 Bridge Worker",
+      submitted: "已创建桥接任务",
+      pending: "桥接排队中",
+      retry: "等待 Bridge 重试",
+      processing: "Bridge 处理中",
+      claimed: "Bridge 处理中",
+      "runway-submitted": "已提交 Runway",
+      "runway-external": "Runway external",
+      completed: "已完成",
+      failed: "失败",
+      cancelled: "已取消"
+    }[value] || status || "未创建桥接任务";
+  }
   return {
     "not-started": "未生成",
+    queued: "等待桥接",
     submitted: "已提交",
     pending: "排队中",
+    retry: "等待重试",
     processing: "生成中",
+    claimed: "桥接处理中",
+    "runway-submitted": "已提交 Runway",
+    "runway-external": "Runway external",
     completed: "已完成",
     failed: "失败",
     cancelled: "已取消"
@@ -3944,8 +3978,77 @@ function videoStatusTone(status = "") {
   const value = String(status || "").toLowerCase();
   if (value === "completed") return "ready";
   if (value === "failed" || value === "cancelled") return "failed";
-  if (["submitted", "pending", "processing"].includes(value)) return "pending";
+  if (["queued", "claimed", "submitted", "pending", "retry", "processing", "runway-submitted", "runway-external"].includes(value)) return "pending";
   return "";
+}
+
+function isRunwayBridgeSelected() {
+  return selectedModelConfig("videoModel", "video")?.provider === "runway-bridge"
+    || current.config?.adapters?.video?.provider === "runway-bridge";
+}
+
+function isRunwayBridgeVideo(video = {}) {
+  return video.provider === "runway-bridge"
+    || video.source === "runway-bridge"
+    || video.kind === "runway-bridge-task"
+    || video.bridge?.provider === "runway-bridge";
+}
+
+function videoSubmitLoadingText() {
+  return isRunwayBridgeSelected() ? "创建桥接任务..." : "提交中...";
+}
+
+function videoSubmissionToast(count = 0, shotId = "") {
+  if (isRunwayBridgeSelected()) {
+    const scope = shotId ? `${shotId} ` : "";
+    return `${scope}已创建 Runway Bridge 任务：${count} 个。请保持 Bridge Worker 窗口打开，提交成功后状态会变为“已提交 Runway”。`;
+  }
+  return shotId ? `${shotId} 视频任务已提交` : `Seedance 视频任务已提交：${count} 个`;
+}
+
+function runwayBridgeHelpText(video = {}) {
+  const status = String(video.status || "").toLowerCase();
+  if (status === "runway-submitted") {
+    return "已交给 Runway 页面生成；当前版本不会自动把 Runway 成片回传到工作台。";
+  }
+  if (status === "runway-external") {
+    return "Runway accepted this task. It no longer blocks local Bridge queue slots; check Runway for completion.";
+  }
+  if (status === "queued") {
+    return "等待本地 Runway Bridge Worker 领取，请确认 start-workbench-runway.bat 打开的 Bridge 窗口保持运行。";
+  }
+  if (status === "retry") {
+    return "上次点击 Runway 后没有确认进入生成队列，Bridge 会在空位出现后重新提交。";
+  }
+  if (status === "processing" || status === "claimed") {
+    return video.bridge?.lastMessage ? `Bridge 当前步骤：${video.bridge.lastMessage}` : "Bridge 正在操作 Runway 页面。";
+  }
+  return "Runway Bridge 是浏览器自动化扩展，成片结果需要在 Runway 页面查看。";
+}
+
+function runwayBridgeTaskUrl(video = {}) {
+  return String(video.bridge?.runwayTaskUrl || video.runwayTaskUrl || "").trim();
+}
+
+function renderRunwayBridgeStatus(video = {}, variant = "card") {
+  const status = String(video.status || "").toLowerCase();
+  const tone = ["runway-submitted", "runway-external"].includes(status) ? "submitted" : status === "failed" ? "failed" : "active";
+  const url = runwayBridgeTaskUrl(video);
+  const detail = runwayBridgeHelpText(video);
+  const lastMessage = video.bridge?.lastMessage && !["runway-submitted", "runway-external"].includes(status)
+    ? `<small>Bridge：${escapeHtml(video.bridge.lastMessage)}</small>`
+    : "";
+  const action = url
+    ? `<a class="runway-status-link" href="${escapeAttr(url)}" target="_blank" rel="noreferrer">打开 Runway 页面</a>`
+    : "";
+  return `
+    <div class="runway-status ${escapeAttr(`is-${tone}`)} ${escapeAttr(`runway-status-${variant}`)}">
+      <strong>${escapeHtml(videoStatusText(status, video))}</strong>
+      <span>${escapeHtml(detail)}</span>
+      ${lastMessage}
+      ${action}
+    </div>
+  `;
 }
 
 function renderPackageAssetReferences(references) {

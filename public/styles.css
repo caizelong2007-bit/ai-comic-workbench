@@ -1724,6 +1724,48 @@ legend {
   word-break: break-all;
 }
 
+.runway-status {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid #f0d997;
+  border-radius: 8px;
+  background: #fff9e8;
+  color: #6d4b00;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.runway-status strong {
+  font-size: 13px;
+}
+
+.runway-status span,
+.runway-status small {
+  color: inherit;
+  word-break: break-word;
+}
+
+.runway-status.is-submitted {
+  border-color: #b8d7ff;
+  background: #eef6ff;
+  color: #225a94;
+}
+
+.runway-status.is-failed {
+  border-color: #ffd0d0;
+  background: #fff4f4;
+  color: var(--red);
+}
+
+.runway-status-link {
+  width: fit-content;
+  color: inherit;
+  font-weight: 900;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .shot-prompt-cell pre {
   min-height: 132px;
   max-height: 190px;
