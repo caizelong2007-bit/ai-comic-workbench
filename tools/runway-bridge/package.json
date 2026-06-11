@@ -1,0 +1,18 @@
+{
+  "name": "ai-comic-workbench-runway-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Optional Runway browser bridge for AI Comic Workbench video tasks.",
+  "type": "commonjs",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "detect-port": "^1.5.1",
+    "puppeteer-core": "^24.10.0"
+  }
+}

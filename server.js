@@ -164,6 +164,12 @@ const APIMART_SEEDANCE_ENDPOINT = "https://api.apimart.ai/v1/videos/generations"
 const APIMART_SEEDANCE_MODEL = "doubao-seedance-2.0";
 const APIMART_SEEDANCE_RESOLUTION = "480p";
 const APIMART_UPLOAD_TTL_MS = 70 * 60 * 60 * 1000;
+const RUNWAY_BRIDGE_PROVIDER = "runway-bridge";
+const RUNWAY_BRIDGE_CONCURRENCY = 2;
+const RUNWAY_BRIDGE_CLAIM_TTL_MS = 30 * 60 * 1000;
+const RUNWAY_BRIDGE_EXTERNAL_SLOT_TTL_MS = 25 * 60 * 1000;
+const RUNWAY_BRIDGE_MODEL = "seedance-2.0";
+const RUNWAY_BRIDGE_PROTOCOL_VERSION = "runway-bridge-provider-submission-v3";
 
 function defaultVideoConfig() {
   return {
@@ -177,6 +183,22 @@ function defaultVideoConfig() {
     fallbackToMock: false,
     timeoutMs: 600000,
     resolution: APIMART_SEEDANCE_RESOLUTION
+  };
+}
+
+function defaultRunwayBridgeConfig() {
+  return {
+    id: "runway-bridge-seedance-2.0",
+    type: "video",
+    name: "Runway Bridge Seedance 2.0",
+    provider: RUNWAY_BRIDGE_PROVIDER,
+    endpoint: "http://127.0.0.1:8800",
+    model: RUNWAY_BRIDGE_MODEL,
+    apiKey: "",
+    fallbackToMock: false,
+    timeoutMs: 120000,
+    resolution: "720p",
+    maxReferenceImages: MAX_SHOT_ASSET_REFS
   };
 }
 
@@ -398,6 +420,21 @@ async function route(req, res) {
   if (pathname === "/api/videos/status" && req.method === "POST") {
     const payload = await readBody(req);
     return sendJson(res, 200, await refreshVideoTasks(payload));
+  }
+
+  if (pathname === "/api/bridge/runway/tasks" && req.method === "GET") {
+    return sendJson(res, 200, await listRunwayBridgeTasks(Object.fromEntries(url.searchParams.entries())));
+  }
+
+  if (pathname === "/api/bridge/runway/tasks/claim" && req.method === "POST") {
+    const payload = await readBody(req);
+    return sendJson(res, 200, await claimRunwayBridgeTasks(payload));
+  }
+
+  const runwayTaskMatch = pathname.match(/^\/api\/bridge\/runway\/tasks\/([^/]+)\/(progress|submitted|complete|fail|retry)$/);
+  if (runwayTaskMatch && req.method === "POST") {
+    const payload = await readBody(req);
+    return sendJson(res, 200, await updateRunwayBridgeTask(runwayTaskMatch[1], runwayTaskMatch[2], payload));
   }
 
   if (pathname.startsWith("/cache/")) {
@@ -1332,6 +1369,9 @@ async function doGenerateVideos(payload = {}) {
     const prompt = buildSeedanceVideoPrompt(config, pack, shot, assets, state.assetImages || []);
     try {
       const referenceImages = await prepareSeedanceReferenceImages(adapter, pack, assets, state.assetImages || []);
+      if (isRunwayBridgeAdapter(adapter)) {
+        return createRunwayBridgeVideoOutput(id, pack, shot, prompt, adapter, referenceImages, config);
+      }
       const result = await callVideo(adapter, {
         prompt,
         shot,
@@ -1372,7 +1412,10 @@ async function doGenerateVideos(payload = {}) {
     latestEpisode.videos = mergeById(latestEpisode.videos || [], outputs);
     touchEpisode(latestEpisode);
     touchState(nextState);
-    addEvent(nextState, "videos.submitted", `${latestEpisode.title} 已提交 ${outputs.length} 个 Seedance 2.0 视频任务`, sourceSummary(outputs), errorSummary(outputs));
+    const bridgeCount = outputs.filter((item) => item.source === RUNWAY_BRIDGE_PROVIDER).length;
+    addEvent(nextState, "videos.submitted", bridgeCount
+      ? `${latestEpisode.title} 已创建 ${bridgeCount} 个 Runway Bridge 待处理视频任务`
+      : `${latestEpisode.title} 已提交 ${outputs.length} 个 Seedance 2.0 视频任务`, sourceSummary(outputs), errorSummary(outputs));
     await writeState(nextState);
     await syncActiveProject({ state: nextState });
     return nextState;
@@ -1395,7 +1438,10 @@ async function refreshVideoTasks(payload = {}) {
       if (!video.taskId) return false;
       if (requestedTaskIds.size && !requestedTaskIds.has(video.taskId)) return false;
       if (requestedVideoIds.size && !requestedVideoIds.has(video.id)) return false;
-      return !["completed", "failed", "cancelled"].includes(String(video.status || "").toLowerCase()) || payload.force === true;
+      if (isRunwayBridgeVideo(video)) {
+        return !["completed", "failed", "cancelled", "runway-external"].includes(String(video.status || "").toLowerCase()) || payload.force === true;
+      }
+      return !["completed", "failed", "cancelled", "runway-submitted"].includes(String(video.status || "").toLowerCase()) || payload.force === true;
     })
     .map((video) => ({ ...video, episodeId: episode.id })));
   if (!pendingVideos.length) {
@@ -1404,6 +1450,9 @@ async function refreshVideoTasks(payload = {}) {
   const adapter = resolveModelAdapter(config, "videoModel");
   const outputs = await runConcurrent(pendingVideos, 2, async (video) => {
     try {
+      if (isRunwayBridgeVideo(video)) {
+        return refreshRunwayBridgeVideo(video);
+      }
       const result = await fetchVideoTaskStatus(adapter, video.taskId);
       return mergeVideoTaskStatus(video, result);
     } catch (error) {
@@ -1604,6 +1653,244 @@ async function callVideo(adapter, request, fallbackFactory) {
   return { source: providerIsMock(adapter) ? "mock" : "mock-fallback", error: skipReason, data: await fallbackFactory() };
 }
 
+function isRunwayBridgeAdapter(adapter = {}) {
+  return String(adapter.provider || "").trim() === RUNWAY_BRIDGE_PROVIDER;
+}
+
+function createRunwayBridgeVideoOutput(id, pack = {}, shot = {}, prompt = "", adapter = {}, referenceImages = [], config = DEFAULT_CONFIG) {
+  const now = new Date().toISOString();
+  const requestPayload = sanitizeVideoRequestPayload(buildSeedanceVideoPayload(config, adapter, prompt, referenceImages, pack, shot));
+  const localReferences = referenceImages.map(publicVideoReferenceImage).map((image) => ({
+    ...image,
+    localPath: localImagePathFromUrl(image.originalUrl || image.url) || ""
+  }));
+  const providerSubmission = buildRunwayBridgeSubmission(prompt, requestPayload, localReferences, pack, shot);
+  return {
+    id,
+    shotId: pack.shotId || shot.id || "",
+    packageId: pack.id || "",
+    prompt,
+    requestPayload,
+    referenceImages: localReferences,
+    providerSubmission,
+    source: RUNWAY_BRIDGE_PROVIDER,
+    adapterError: "",
+    status: "queued",
+    progress: null,
+    stale: false,
+    staleReason: "",
+    staleAt: "",
+    taskId: `runway-${id}-${Date.now()}`,
+    url: "",
+    file: null,
+    kind: "runway-bridge-task",
+    model: adapter.model || RUNWAY_BRIDGE_MODEL,
+    resolution: adapter.resolution || "720p",
+    provider: RUNWAY_BRIDGE_PROVIDER,
+    bridge: {
+      provider: RUNWAY_BRIDGE_PROVIDER,
+      status: "queued",
+      claimId: "",
+      claimedAt: "",
+      workerId: "",
+      attempts: 0,
+      maxConcurrency: RUNWAY_BRIDGE_CONCURRENCY
+    },
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+function buildRunwayBridgeSubmission(prompt = "", requestPayload = {}, references = [], pack = {}, shot = {}) {
+  const mappedReferences = buildRunwayBridgeReferenceMap(references);
+  const promptForRunway = buildRunwayBridgeCompactPrompt(pack, shot, mappedReferences, prompt);
+  return {
+    schemaVersion: "runway-bridge-submission-v1",
+    provider: RUNWAY_BRIDGE_PROVIDER,
+    prompt: promptForRunway,
+    requestPayload: {
+      ...requestPayload,
+      prompt: promptForRunway
+    },
+    referenceImages: mappedReferences,
+    size: requestPayload.size || seedanceSize(),
+    duration: requestPayload.duration || seedanceDuration(pack.durationSec || shot.durationSec || 15),
+    resolution: requestPayload.resolution || "720p",
+    sourcePromptHash: hashText(prompt),
+    createdAt: new Date().toISOString()
+  };
+}
+
+function buildRunwayBridgeCompactPrompt(pack = {}, shot = {}, references = [], fallbackPrompt = "") {
+  const refLines = references.map((item) => `Image ${item.index}: @${item.id}${item.type ? ` (${item.type})` : ""}`).join("\n");
+  const subShotLines = (Array.isArray(pack.subShots) ? pack.subShots : []).map((subShot) => compactJoin([
+    subShot.timeRange ? `[${subShot.timeRange}]` : "",
+    subShot.cameraLanguage,
+    subShot.blocking,
+    subShot.composition,
+    subShot.action,
+    subShot.assetRefs?.length ? `Refs: ${subShot.assetRefs.map((id) => `@${id}`).join(" ")}` : ""
+  ], " ")).filter(Boolean);
+  const fallbackShot = compactJoin([
+    shot.camera,
+    shot.action,
+    shot.dialogue ? `Dialogue: ${shot.dialogue}` : "",
+    shot.continuity ? `Continuity: ${shot.continuity}` : ""
+  ], " ");
+  const dialogue = (Array.isArray(pack.dialogue) ? pack.dialogue : []).map((row) => compactJoin([
+    row.timeRange,
+    row.speakerAssetId ? `@${row.speakerAssetId}` : "",
+    row.voice,
+    row.text ? `"${row.text}"` : ""
+  ], " ")).filter(Boolean).join("\n");
+  const audio = (Array.isArray(pack.audio) ? pack.audio : []).map((row) => compactJoin([
+    row.timeRange,
+    row.content,
+    row.assetRefs?.length ? `Refs: ${row.assetRefs.map((id) => `@${id}`).join(" ")}` : ""
+  ], " ")).filter(Boolean).join("\n");
+  const parts = [
+    "Create one continuous cinematic video using the uploaded reference images.",
+    references.length ? `Reference order:\n${refLines}` : "",
+    "Rules: match every @asset to its image number; keep identity, layout, prop shape, scale, colors, materials, and lighting consistent. No text, subtitles, logos, or watermark.",
+    subShotLines.length ? `Timeline:\n${subShotLines.join("\n")}` : `Shot:\n${fallbackShot || postProcessRunwayBridgePrompt(sanitizeRunwayBridgePrompt(fallbackPrompt)).slice(0, 1200)}`,
+    pack.soundDesign ? `Sound: ${pack.soundDesign}` : "",
+    audio ? `Audio cues:\n${audio}` : "",
+    dialogue ? `Dialogue:\n${dialogue}` : ""
+  ].filter(Boolean).join("\n\n");
+  return clampPromptLength(postProcessRunwayBridgePrompt(parts), 2600);
+}
+
+function compactJoin(values = [], separator = " ") {
+  return values.map((value) => String(value || "").replace(/\s+/g, " ").trim()).filter(Boolean).join(separator).trim();
+}
+
+function sanitizeRunwayBridgePrompt(prompt = "") {
+  const replacements = [
+    [/Seedance\s*2\.0/gi, "video model"],
+    [/Runway/gi, "the video tool"],
+    [/APIMart/gi, "API provider"],
+    [/我的世界/g, "方块沙盒世界"],
+    [/Minecraft/gi, "blocky sandbox world"],
+    [/\bMC\b/g, "方块沙盒"],
+    [/末影龙/g, "黑紫色方块巨龙"],
+    [/Ender\s*Dragon/gi, "black-purple blocky dragon"],
+    [/末影人/g, "高瘦黑色方块人影"],
+    [/Enderman/gi, "tall black blocky shadow figure"],
+    [/末地/g, "暗紫色虚空岛屿"],
+    [/\bIP\b/g, "style"]
+  ];
+  let text = String(prompt || "");
+  for (const [pattern, replacement] of replacements) {
+    text = text.replace(pattern, replacement);
+  }
+  return text
+    .replace(/视频生成提示词。请结合 image_urls 参考图生成连续视频，不要生成故事板图或首帧图。/g, "请结合已上传参考图生成连续视频。")
+    .replace(/image_urls/g, "uploaded reference images")
+    .replace(/@([A-Z]+[0-9]+)/g, "@$1")
+    .trim();
+}
+
+function postProcessRunwayBridgePrompt(prompt = "") {
+  return String(prompt || "")
+    .replace(/Seedance\s*2\.0/gi, "video")
+    .replace(/Runway/gi, "video tool")
+    .replace(/APIMart/gi, "API")
+    .replace(/Minecraft/gi, "blocky sandbox world")
+    .replace(/\bMC\b/g, "blocky sandbox")
+    .replace(/我的世界/g, "方块沙盒世界")
+    .replace(/末影龙/g, "黑紫色方块巨龙")
+    .replace(/末影人/g, "高瘦黑色方块人影")
+    .replace(/末地/g, "暗紫色虚空岛屿")
+    .replace(/龙蛋/g, "黑紫色发光蛋形道具")
+    .replace(/\bIP\b/g, "style")
+    .replace(/Uploaded file:[^\n]+/gi, "")
+    .replace(/World Cup/gi, "international sports event")
+    .replace(/FIFA/gi, "sports organization")
+    .replace(/Cold War/gi, "historical period")
+    .replace(/nuclear/gi, "large-scale scientific")
+    .replace(/atomic/gi, "high-energy")
+    .replace(/bomb/gi, "distant bright event")
+    .replace(/military/gi, "field operations")
+    .replace(/army/gi, "field team")
+    .replace(/soldier/gi, "field staff member")
+    .replace(/commander/gi, "team lead")
+    .replace(/command center/gi, "operations room")
+    .replace(/underground command post/gi, "underground operations room")
+    .replace(/detonation/gi, "timed activation")
+    .replace(/test tower/gi, "distant equipment tower")
+    .replace(/experiment/gi, "field test")
+    .replace(/explosion/gi, "bright distant event")
+    .replace(/mushroom cloud/gi, "large distant cloud column")
+    .replace(/weapon/gi, "equipment")
+    .replace(/battle/gi, "tense scene")
+    .replace(/war/gi, "historical tension")
+    .replace(/countdown/gi, "timed announcement")
+    .replace(/戈壁/g, "荒漠")
+    .replace(/地下指挥所/g, "地下工作室")
+    .replace(/指挥所/g, "工作室")
+    .replace(/总指挥/g, "负责人")
+    .replace(/指挥/g, "协调")
+    .replace(/战士/g, "现场工作人员")
+    .replace(/军人/g, "工作人员")
+    .replace(/军装/g, "制服")
+    .replace(/军帽/g, "制服帽")
+    .replace(/军靴/g, "工作靴")
+    .replace(/岗位/g, "工作点")
+    .replace(/警戒/g, "现场看护")
+    .replace(/试验铁塔/g, "远处设备塔")
+    .replace(/核试验/g, "大型科研任务")
+    .replace(/核爆炸/g, "远处强光事件")
+    .replace(/核爆/g, "远处强光事件")
+    .replace(/原子弹/g, "大型科研装置")
+    .replace(/试验区域/g, "工作区域")
+    .replace(/实验成功/g, "任务完成")
+    .replace(/实验/g, "任务")
+    .replace(/蘑菇云/g, "远处云柱")
+    .replace(/云柱/g, "远处云柱")
+    .replace(/起爆/g, "启动")
+    .replace(/倒计时/g, "计时播报")
+    .replace(/命令/g, "指示")
+    .replace(/最后程序/g, "最后流程")
+    .replace(/爆心/g, "远处光点")
+    .replace(/爆炸/g, "强光")
+    .trim();
+}
+
+function buildRunwayBridgeReferenceMap(references = []) {
+  return (references || []).filter((image) => image.localPath || image.originalUrl || image.url).slice(0, MAX_SHOT_ASSET_REFS).map((image, index) => {
+    const localPath = image.localPath || localImagePathFromUrl(image.originalUrl || image.url) || "";
+    const ext = path.extname(localPath || image.originalUrl || image.url || "").toLowerCase() || ".png";
+    const safeId = safeRunwayUploadName(image.id || `REF${index + 1}`);
+    const safeName = safeRunwayUploadName(runwayUploadLabel(image, index));
+    return {
+      index: index + 1,
+      id: image.id || "",
+      type: image.type || "",
+      name: image.name || "",
+      uploadFileName: `${String(index + 1).padStart(2, "0")}_${safeId}_${safeName}${ext}`,
+      localPath,
+      url: image.url || "",
+      originalUrl: image.originalUrl || ""
+    };
+  });
+}
+
+function runwayUploadLabel(image = {}, index = 0) {
+  const type = String(image.type || "").toLowerCase();
+  if (type === "character") return "character";
+  if (type === "location") return "location";
+  if (type === "prop") return "prop";
+  return image.name || image.type || `asset-${index + 1}`;
+}
+
+function safeRunwayUploadName(value) {
+  return String(value || "asset")
+    .replace(/[<>:"/\\|?*\u0000-\u001F]+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "asset";
+}
+
 async function callApimartSeedanceVideo(adapter, request = {}) {
   const prompt = clampPromptLength(request.prompt || "", 3900);
   const payload = buildSeedanceVideoPayload(request.config || DEFAULT_CONFIG, adapter, prompt, request.referenceImages || [], request.pack || {}, request.shot || {});
@@ -1786,6 +2073,9 @@ async function prepareSeedanceReferenceImages(adapter, pack = {}, assets = [], a
   if (!references.length) {
     return [];
   }
+  if (isRunwayBridgeAdapter(adapter)) {
+    return references.map((asset) => ({ ...asset, url: asset.imageUrl, remoteUrl: asset.imageUrl, originalUrl: asset.imageUrl, mode: "local-upload" }));
+  }
   if (adapter.provider !== "apimart-seedance") {
     return references.map((asset) => ({ ...asset, url: asset.imageUrl, remoteUrl: asset.imageUrl, mode: "direct" }));
   }
@@ -1902,6 +2192,261 @@ function mergeVideoTaskStatus(video = {}, task = {}) {
     rawStatus: task.raw || video.rawStatus || "",
     updatedAt: new Date().toISOString()
   };
+}
+
+async function listRunwayBridgeTasks(query = {}) {
+  const state = await readState();
+  const activeSlots = countRunwayBridgeActiveSlots(state);
+  const freeSlots = Math.max(0, RUNWAY_BRIDGE_CONCURRENCY - activeSlots);
+  const requestedLimit = Number.isFinite(Number(query.limit)) ? Number(query.limit) : RUNWAY_BRIDGE_CONCURRENCY;
+  const limit = Math.max(0, Math.min(freeSlots, requestedLimit));
+  const tasks = collectRunwayBridgeTasks(state)
+    .filter((task) => isRunwayBridgeTaskAvailable(task.video))
+    .slice(0, limit)
+    .map((task) => publicRunwayBridgeTask(task));
+  return { ok: true, tasks, count: tasks.length, concurrency: RUNWAY_BRIDGE_CONCURRENCY, activeSlots, freeSlots };
+}
+
+async function claimRunwayBridgeTasks(payload = {}) {
+  const workerId = String(payload.workerId || `runway-worker-${Date.now()}`).trim();
+  const protocolVersion = String(payload.protocolVersion || "").trim();
+  if (protocolVersion !== RUNWAY_BRIDGE_PROTOCOL_VERSION) {
+    return {
+      ok: true,
+      tasks: [],
+      claimId: "",
+      workerId,
+      rejected: true,
+      reason: "Runway Bridge script version is outdated. Restart tools/runway-bridge with the latest code.",
+      requiredProtocolVersion: RUNWAY_BRIDGE_PROTOCOL_VERSION
+    };
+  }
+  const limit = 1;
+  const claimId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  let claimed = [];
+  const latestState = await withStateWriteLock(async () => {
+    const state = await readState();
+    claimed = [];
+    const activeSlots = countRunwayBridgeActiveSlots(state);
+    const freeSlots = Math.max(0, RUNWAY_BRIDGE_CONCURRENCY - activeSlots);
+    const effectiveLimit = Math.min(limit, freeSlots);
+    for (const task of collectRunwayBridgeTasks(state)) {
+      if (claimed.length >= effectiveLimit) break;
+      if (!isRunwayBridgeTaskAvailable(task.video)) continue;
+      const video = task.video;
+      video.status = "processing";
+      video.progress = video.progress ?? 0;
+      video.updatedAt = now;
+      video.bridge = {
+        ...(video.bridge || {}),
+        provider: RUNWAY_BRIDGE_PROVIDER,
+        status: "processing",
+        claimId,
+        claimedAt: now,
+        workerId,
+        attempts: Number(video.bridge?.attempts || 0) + 1,
+        maxConcurrency: RUNWAY_BRIDGE_CONCURRENCY,
+        activeSlotsBeforeClaim: activeSlots,
+        protocolVersion
+      };
+      claimed.push(publicRunwayBridgeTask({ ...task, video }));
+      touchEpisode(task.episode);
+    }
+    if (claimed.length) {
+      touchState(state);
+      addEvent(state, "runway.claimed", `Runway Bridge 已领取 ${claimed.length} 个视频任务`, workerId);
+    }
+    await writeState(state);
+    await syncActiveProject({ state });
+    return state;
+  });
+  return { ok: true, tasks: claimed, claimId, workerId, state: latestState };
+}
+
+function countRunwayBridgeActiveSlots(state = {}) {
+  return collectRunwayBridgeTasks(state).filter(({ video }) => isRunwayBridgeActiveSlot(video)).length;
+}
+
+function isRunwayBridgeActiveSlot(video = {}) {
+  if (!isRunwayBridgeVideo(video)) return false;
+  const status = String(video.status || "").toLowerCase();
+  const claimedAt = Date.parse(video.bridge?.claimedAt || "");
+  const submittedAt = Date.parse(video.bridge?.submittedAt || video.updatedAt || "");
+  if (status === "processing") {
+    return Boolean(claimedAt && Date.now() - claimedAt < RUNWAY_BRIDGE_CLAIM_TTL_MS);
+  }
+  return false;
+}
+
+async function updateRunwayBridgeTask(taskId = "", action = "", payload = {}) {
+  if (!taskId) throw new Error("Missing Runway Bridge task id");
+  const latestState = await withStateWriteLock(async () => {
+    const state = await readState();
+    const found = findRunwayBridgeTask(state, taskId);
+    if (!found) throw new Error(`Runway Bridge task not found: ${taskId}`);
+    const video = found.video;
+    const now = new Date().toISOString();
+    if (action === "progress") {
+      video.status = "processing";
+      video.progress = Number.isFinite(Number(payload.progress)) ? Number(payload.progress) : video.progress ?? 0;
+      video.adapterError = "";
+      video.bridge = { ...(video.bridge || {}), status: "processing", lastMessage: String(payload.message || ""), updatedAt: now };
+    } else if (action === "submitted") {
+      video.status = "runway-submitted";
+      video.progress = Number.isFinite(Number(payload.progress)) ? Number(payload.progress) : Math.max(Number(video.progress || 0), 35);
+      video.adapterError = "";
+      video.rawStatus = payload.raw ? summarizeAdapterResponse(payload.raw) : video.rawStatus || "";
+      video.bridge = {
+        ...(video.bridge || {}),
+        status: "runway-submitted",
+        submittedAt: now,
+        runwayTaskUrl: String(payload.runwayTaskUrl || payload.url || video.bridge?.runwayTaskUrl || ""),
+        lastMessage: String(payload.message || "Submitted to Runway"),
+        updatedAt: now
+      };
+    } else if (action === "complete") {
+      const saved = payload.dataUrl ? await saveDataUrlVideo(payload.dataUrl, taskId) : null;
+      video.status = "completed";
+      video.progress = 100;
+      video.url = String(payload.url || saved?.url || video.url || "");
+      video.file = saved?.file || payload.file || video.file || null;
+      video.thumbnailUrl = String(payload.thumbnailUrl || video.thumbnailUrl || "");
+      video.adapterError = "";
+      video.rawStatus = payload.raw ? summarizeAdapterResponse(payload.raw) : video.rawStatus || "";
+      video.bridge = { ...(video.bridge || {}), status: "completed", completedAt: now, outputSource: payload.dataUrl ? "data-url" : payload.url ? "url" : "" };
+    } else if (action === "fail") {
+      video.status = "failed";
+      video.progress = null;
+      video.adapterError = publicError(payload.error || payload.message || "Runway Bridge task failed");
+      video.bridge = { ...(video.bridge || {}), status: "failed", failedAt: now, error: video.adapterError };
+    } else if (action === "retry") {
+      video.status = "queued";
+      video.progress = null;
+      video.adapterError = publicError(payload.error || payload.message || "Runway Bridge submit was not confirmed; queued for retry");
+      video.bridge = {
+        ...(video.bridge || {}),
+        status: "queued",
+        claimId: "",
+        claimedAt: "",
+        workerId: "",
+        retryAt: now,
+        lastMessage: video.adapterError,
+        error: video.adapterError
+      };
+    } else {
+      throw new Error(`Unsupported Runway Bridge action: ${action}`);
+    }
+    video.updatedAt = now;
+    touchEpisode(found.episode);
+    touchState(state);
+    addEvent(state, `runway.${action}`, `${found.episode.title || found.episode.id} ${video.shotId || video.id} Runway Bridge ${action}`, video.url || "", video.adapterError || "");
+    await writeState(state);
+    await syncActiveProject({ state });
+    return state;
+  });
+  return { ok: true, state: latestState };
+}
+
+function collectRunwayBridgeTasks(state = {}) {
+  return (state.episodes || []).flatMap((episode) => (episode.videos || [])
+    .filter((video) => isRunwayBridgeVideo(video))
+    .map((video) => ({ episode, video })));
+}
+
+function findRunwayBridgeTask(state = {}, taskId = "") {
+  return collectRunwayBridgeTasks(state).find(({ video }) => video.taskId === taskId || video.id === taskId);
+}
+
+function isRunwayBridgeVideo(video = {}) {
+  return video.source === RUNWAY_BRIDGE_PROVIDER || video.provider === RUNWAY_BRIDGE_PROVIDER || video.kind === "runway-bridge-task" || video.bridge?.provider === RUNWAY_BRIDGE_PROVIDER;
+}
+
+function isRunwayBridgeTaskAvailable(video = {}) {
+  if (!isRunwayBridgeVideo(video)) return false;
+  if (["completed", "failed", "cancelled", "runway-submitted", "runway-external"].includes(String(video.status || "").toLowerCase())) return false;
+  const claimedAt = Date.parse(video.bridge?.claimedAt || "");
+  if (String(video.status || "").toLowerCase() === "processing" && claimedAt && Date.now() - claimedAt < RUNWAY_BRIDGE_CLAIM_TTL_MS) {
+    return false;
+  }
+  return true;
+}
+
+function refreshRunwayBridgeVideo(video = {}) {
+  const now = new Date().toISOString();
+  const claimedAt = Date.parse(video.bridge?.claimedAt || "");
+  const submittedAt = Date.parse(video.bridge?.submittedAt || video.updatedAt || "");
+  const status = String(video.status || "").toLowerCase();
+  if (status === "processing" && claimedAt && Date.now() - claimedAt >= RUNWAY_BRIDGE_CLAIM_TTL_MS) {
+    return {
+      ...video,
+      status: "queued",
+      progress: null,
+      adapterError: "Runway Bridge claim expired. Start the bridge script again to retry this task.",
+      bridge: {
+        ...(video.bridge || {}),
+        status: "queued",
+        claimId: "",
+        claimedAt: "",
+        workerId: "",
+        expiredAt: now
+      },
+      updatedAt: now
+    };
+  }
+  if (status === "runway-submitted" && submittedAt && Date.now() - submittedAt >= RUNWAY_BRIDGE_EXTERNAL_SLOT_TTL_MS) {
+    return {
+      ...video,
+      status: "runway-external",
+      adapterError: video.adapterError || "",
+      bridge: {
+        ...(video.bridge || {}),
+        status: "runway-external",
+        externalizedAt: video.bridge?.externalizedAt || now,
+        lastMessage: "Runway accepted this task. It no longer blocks Bridge queue slots; check Runway for completion."
+      },
+      updatedAt: now
+    };
+  }
+  return {
+    ...video,
+    adapterError: video.adapterError || "",
+    updatedAt: now
+  };
+}
+
+function publicRunwayBridgeTask(task = {}) {
+  const video = task.video || {};
+  return {
+    id: video.id || "",
+    taskId: video.taskId || "",
+    episodeId: task.episode?.id || "",
+    shotId: video.shotId || "",
+    packageId: video.packageId || "",
+    prompt: video.prompt || video.requestPayload?.prompt || "",
+    requestPayload: video.requestPayload || {},
+    providerSubmission: video.providerSubmission || null,
+    referenceImages: (video.referenceImages || []).map((image) => ({
+      ...image,
+      localPath: image.localPath || localImagePathFromUrl(image.originalUrl || image.url) || ""
+    })),
+    status: video.status || "",
+    progress: video.progress ?? null,
+    bridge: video.bridge || {},
+    createdAt: video.createdAt || "",
+    updatedAt: video.updatedAt || ""
+  };
+}
+
+async function saveDataUrlVideo(dataUrl = "", name = "video") {
+  const match = String(dataUrl || "").match(/^data:video\/([a-z0-9.+-]+);base64,(.+)$/i);
+  if (!match) throw new Error("Invalid video dataUrl");
+  const ext = match[1].toLowerCase().includes("webm") ? ".webm" : ".mp4";
+  const fileName = `${safeFileName(name)}-${Date.now()}${ext}`;
+  const fullPath = path.join(VIDEO_DIR, fileName);
+  await fs.writeFile(fullPath, Buffer.from(match[2], "base64"));
+  const file = path.relative(ROOT, fullPath);
+  return { url: cacheUrl(file), file };
 }
 
 function normalizeVideoOutput(id, pack = {}, shot = {}, prompt = "", adapter = {}, result = {}, referenceImages = [], config = DEFAULT_CONFIG) {
@@ -3947,6 +4492,9 @@ function imageSizeForAspect(aspectRatio) {
 }
 
 function canUseAdapter(adapter = {}) {
+  if (adapter.provider === RUNWAY_BRIDGE_PROVIDER) {
+    return true;
+  }
   return adapter.provider && adapter.provider !== "mock" && adapter.endpoint && adapter.apiKey && adapter.model;
 }
 
@@ -4813,6 +5361,9 @@ function normalizeModelConfigs(current = {}, next = {}) {
     if (type === "video" && ![...byId.values()].some((model) => model.provider === "apimart-seedance")) {
       byId.set("apimart-seedance-2.0", normalizeModelConfig("video", defaultVideoConfig()));
     }
+    if (type === "video" && ![...byId.values()].some((model) => model.provider === RUNWAY_BRIDGE_PROVIDER)) {
+      byId.set("runway-bridge-seedance-2.0", normalizeModelConfig("video", defaultRunwayBridgeConfig()));
+    }
     output[type] = [...byId.values()].map((model) => {
       const fallback = DEFAULT_CONFIG.adapters[type];
       return {
@@ -4831,10 +5382,14 @@ function normalizeModelConfig(type, model = {}, currentAdapter = {}) {
   const provider = normalizeModelProvider(type, stringOr(model.provider, fallback.provider));
   const endpoint = type === "video" && provider === "apimart-seedance"
     ? stringOr(model.endpoint, APIMART_SEEDANCE_ENDPOINT)
-    : stringOr(model.endpoint, fallback.endpoint);
+    : type === "video" && provider === RUNWAY_BRIDGE_PROVIDER
+      ? stringOr(model.endpoint, "http://127.0.0.1:8800")
+      : stringOr(model.endpoint, fallback.endpoint);
   const modelName = type === "video" && provider === "apimart-seedance"
     ? stringOr(model.model, APIMART_SEEDANCE_MODEL)
-    : stringOr(model.model, fallback.model);
+    : type === "video" && provider === RUNWAY_BRIDGE_PROVIDER
+      ? stringOr(model.model, RUNWAY_BRIDGE_MODEL)
+      : stringOr(model.model, fallback.model);
   return {
     id,
     type,
@@ -4845,7 +5400,7 @@ function normalizeModelConfig(type, model = {}, currentAdapter = {}) {
     apiKey,
     fallbackToMock: model.fallbackToMock === true,
     timeoutMs: Number(model.timeoutMs || fallback.timeoutMs),
-    ...(type === "video" ? { resolution: stringOr(model.resolution, provider === "apimart-seedance" ? APIMART_SEEDANCE_RESOLUTION : fallback.resolution || "") } : {})
+    ...(type === "video" ? { resolution: stringOr(model.resolution, provider === "apimart-seedance" ? APIMART_SEEDANCE_RESOLUTION : provider === RUNWAY_BRIDGE_PROVIDER ? "720p" : fallback.resolution || "") } : {})
   };
 }
 
@@ -5519,6 +6074,9 @@ function adapterSkipReason(adapter = {}) {
   if (!adapter.provider || adapter.provider === "mock") {
     return "";
   }
+  if (adapter.provider === RUNWAY_BRIDGE_PROVIDER) {
+    return "";
+  }
   const missing = [];
   if (!adapter.endpoint) {
     missing.push("endpoint");
@@ -5552,6 +6110,10 @@ function safeFileName(value) {
 function hashNumber(text) {
   const hash = crypto.createHash("sha1").update(String(text)).digest();
   return hash.readUInt32BE(0);
+}
+
+function hashText(text) {
+  return crypto.createHash("sha1").update(String(text || "")).digest("hex").slice(0, 16);
 }
 
 function wrapSvgText(text, maxChars) {
