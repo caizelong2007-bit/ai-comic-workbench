@@ -11,11 +11,14 @@ data/state.json
 cache/images/*
 cache/videos/*
 *.mp4
+dist/
 
 # Local logs
 *.log
 server-*.log
 server-*.err.log
+tools/runway-bridge/tmp/
+tools/runway-bridge/node_modules/
 
 # OS/editor noise
 .DS_Store
