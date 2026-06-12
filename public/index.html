@@ -308,7 +308,7 @@
             <span>提示词 <small>Seedance 2.0</small></span>
             <span>视频</span>
           </div>
-          <div id="shotsOutput" class="shot-list empty">还没有 15s 分镜。</div>
+          <div id="shotsOutput" class="shot-list empty">还没有视频分镜。</div>
         </div>
       </section>
 
@@ -331,7 +331,7 @@
         <div class="panel-card final-card">
           <p class="eyebrow">Final Output</p>
           <h3>输出单集成片</h3>
-          <p class="muted-text">当前可交付物是：当前剧集 15s 分镜脚本、项目资产参考图、Seedance 可用分镜提示词包与已生成的视频片段。单集成片合成会在后续接入剪辑输出流程。</p>
+          <p class="muted-text">当前可交付物是：当前剧集视频分镜脚本、项目资产参考图、Seedance 可用分镜提示词包与已生成的视频片段。单集成片合成会在后续接入剪辑输出流程。</p>
           <div id="outputSummary" class="output-summary"></div>
         </div>
       </section>
@@ -528,7 +528,7 @@
           <p class="eyebrow">Shot Script</p>
           <h2 id="shotEditorTitle">编辑分镜脚本</h2>
         </div>
-        <span id="shotEditorMeta" class="tag">15s</span>
+        <span id="shotEditorMeta" class="tag">5-15s</span>
       </div>
       <form id="shotEditorForm" class="shot-editor-form">
         <div class="shot-editor-grid">
@@ -539,6 +539,59 @@
         <label><span>画面动作</span><textarea name="action" rows="6"></textarea></label>
         <label><span>台词 / 旁白</span><textarea name="dialogue" rows="4"></textarea></label>
         <label><span>关键元素 / 资产提示</span><textarea name="assetNotes" rows="4"></textarea></label>
+        <div class="shot-editor-grid">
+          <label>
+            <span>剪辑关系</span>
+            <select name="cutRelation">
+              <option value="continuous_action">连续动作</option>
+              <option value="reaction_cut">反应剪辑</option>
+              <option value="match_cut">匹配剪辑</option>
+              <option value="time_cut">时间省略</option>
+              <option value="location_cut">场景切换</option>
+              <option value="montage">蒙太奇</option>
+              <option value="reveal_cut">揭示剪辑</option>
+            </select>
+          </label>
+          <label>
+            <span>省略方式</span>
+            <select name="ellipsis">
+              <option value="none">不省略</option>
+              <option value="slight">轻微省略</option>
+              <option value="clear_time_jump">明确跳切</option>
+              <option value="montage_compression">蒙太奇压缩</option>
+            </select>
+          </label>
+        </div>
+        <div class="shot-editor-grid">
+          <label>
+            <span>运镜动机</span>
+            <select name="cameraMotivation">
+              <option value="follow_action">跟随动作</option>
+              <option value="reveal_information">揭示信息</option>
+              <option value="emphasize_threat">强化威胁</option>
+              <option value="show_reaction">表现反应</option>
+              <option value="guide_attention">引导视线</option>
+              <option value="build_suspense">制造悬念</option>
+              <option value="impact_aftershock">冲击余波</option>
+              <option value="spatial_establish">建立空间</option>
+            </select>
+          </label>
+          <label>
+            <span>剪辑节奏</span>
+            <select name="pace">
+              <option value="slow_tension">慢速悬念</option>
+              <option value="normal_action">正常动作</option>
+              <option value="quick_panic">快速慌乱</option>
+              <option value="impact_pause">冲击停顿</option>
+              <option value="montage_fast">快速蒙太奇</option>
+              <option value="emotional_hold">情绪停留</option>
+            </select>
+          </label>
+        </div>
+        <label><span>开头承接</span><textarea name="entryBeat" rows="4"></textarea></label>
+        <label><span>核心动作</span><textarea name="mainBeat" rows="4"></textarea></label>
+        <label><span>结尾状态</span><textarea name="exitBeat" rows="4"></textarea></label>
+        <label><span>连续性校验</span><textarea name="continuityCheck" rows="3"></textarea></label>
         <label><span>视觉备注</span><textarea name="visualNotes" rows="4"></textarea></label>
         <label><span>连续性 / 衔接状态</span><textarea name="continuity" rows="4"></textarea></label>
         <div class="modal-actions prompt-detail-actions">
