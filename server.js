@@ -135,7 +135,7 @@ const DEFAULT_CONFIG = {
       promptSchema: "seedance-prompt-package-v1",
       requestBuilder: "seedance",
       maxReferenceImages: 6,
-      description: "15s 分镜提示词 + 最多 6 张资产参考图。"
+      description: "5-15s 分镜提示词 + 最多 6 张资产参考图。"
     }
   ]
 };
@@ -509,20 +509,20 @@ async function generateShots(payload = {}) {
   if (existing) {
     return { ok: true, state: existing.state, job: existing.job, duplicate: true };
   }
-  const start = await markJobRunning("generate", scopeId, "15s 分镜生成中");
+  const start = await markJobRunning("generate", scopeId, "视频分镜生成中");
   if (start.duplicate) {
     return { ok: true, state: start.state, job: start.job, duplicate: true };
   }
   try {
     const response = await doGenerateShots(payload);
     await markJobFinished("generate", scopeId, "succeeded", {
-      label: "15s 分镜已完成",
+      label: "视频分镜已完成",
       result: { source: response.source || "" }
     });
     return { ...response, state: await readState() };
   } catch (error) {
     await markJobFinished("generate", scopeId, "failed", {
-      label: "15s 分镜生成失败",
+      label: "视频分镜生成失败",
       error: publicError(error)
     });
     throw error;
@@ -559,7 +559,7 @@ async function doGenerateShots(payload = {}) {
     latestEpisode.promptPackages = [];
     touchEpisode(latestEpisode);
     touchState(nextState);
-    addEvent(nextState, "shots.generated", `${latestEpisode.title} 已生成 ${latestEpisode.shots.length} 个 15s 分镜`, result.source, result.error);
+    addEvent(nextState, "shots.generated", `${latestEpisode.title} 已生成 ${latestEpisode.shots.length} 个视频分镜`, result.source, result.error);
     await writeState(nextState);
     await syncActiveProject({ state: nextState });
     return nextState;
@@ -960,6 +960,14 @@ function mergeShotEdits(currentShot = {}, patch = {}, updatedAt = new Date().toI
     assetNotes: editableString(patch.assetNotes, currentShot.assetNotes || ""),
     visualNotes: editableString(patch.visualNotes, currentShot.visualNotes || ""),
     continuity: editableString(patch.continuity, currentShot.continuity || ""),
+    cutRelation: normalizeCutRelation(patch.cutRelation ?? currentShot.cutRelation, Number(currentShot.order || 1) - 1),
+    entryBeat: editableString(patch.entryBeat, currentShot.entryBeat || ""),
+    mainBeat: editableString(patch.mainBeat, currentShot.mainBeat || currentShot.action || ""),
+    exitBeat: editableString(patch.exitBeat, currentShot.exitBeat || ""),
+    cameraMotivation: normalizeCameraMotivation(patch.cameraMotivation ?? currentShot.cameraMotivation, currentShot),
+    pace: normalizePace(patch.pace ?? currentShot.pace, currentShot),
+    ellipsis: normalizeEllipsis(patch.ellipsis ?? currentShot.ellipsis),
+    continuityCheck: editableString(patch.continuityCheck, currentShot.continuityCheck || ""),
     manualEditedAt: updatedAt,
     updatedAt
   };
@@ -976,7 +984,7 @@ function mergeShotEdits(currentShot = {}, patch = {}, updatedAt = new Date().toI
     ...next,
     id: currentShot.id,
     order: currentShot.order,
-    durationSec: 15,
+    durationSec: normalizeClipDuration(patch.durationSec || currentShot.durationSec || 15),
     assetRefs: Array.isArray(currentShot.assetRefs) ? currentShot.assetRefs : []
   };
 }
@@ -1220,7 +1228,7 @@ async function doGeneratePromptPackages(payload = {}) {
     throw new Error("剧集不存在");
   }
   if (!episode.shots.length) {
-    throw new Error("请先生成 15s 分镜");
+    throw new Error("请先生成视频分镜");
   }
   if (!countCards(state.cards)) {
     throw new Error("请先提取资产卡");
@@ -1231,7 +1239,7 @@ async function doGeneratePromptPackages(payload = {}) {
   if (requestedIds.size && !selectedShots.length) {
     throw new Error(`未找到要生成提示词的分镜：${[...requestedIds].join(", ")}`);
   }
-  const shots = selectedShots.map((shot) => ({ ...shot, durationSec: 15 }));
+  const shots = selectedShots.map((shot) => ({ ...shot, durationSec: normalizeClipDuration(shot.durationSec || 15) }));
   const prompt = buildPromptPackagesPrompt(config, shots, state.cards, state.assetImages || [], episode);
   const result = await callLlmJson(resolveModelAdapter(config, "promptPackageLlm"), prompt, () => mockPromptPackages(config, shots, state.cards, state.assetImages || []));
   const outputs = normalizePromptPackages(result.data, shots, state.cards, state.assetImages || [], result.source, result.error || "", activeVideoProfile(config));
@@ -2539,6 +2547,7 @@ function buildScriptPrompt(config) {
 
 function buildEpisodeScriptPrompt(config, state, episodeInfo = {}) {
   const projectScript = state.storyScript || scriptFromUserText(config.project.title || "未命名项目", config.project.logline || "", config);
+  const budgetPlan = episodeBudgetPlan(config.project, projectScript, episodeInfo);
   const previousEpisode = [...(state.episodes || [])]
     .filter((episode) => Number(episode.order || 0) < Number(episodeInfo.order || 1))
     .sort((a, b) => Number(b.order || 0) - Number(a.order || 0))[0] || null;
@@ -2551,12 +2560,15 @@ function buildEpisodeScriptPrompt(config, state, episodeInfo = {}) {
   const sourceMode = episodeInfo.mode || (episodeInfo.note ? "brief_guided" : "auto_continue");
   return JSON.stringify({
     task: "structure_episode_script_from_brief",
-    requirement: "根据用户本集故事意图、项目总剧本和上一集内容，生成/完善当前单集结构化剧本。保持故事连贯、角色状态连续、容量适合后续拆成 6-10 个 15s 分镜。",
+    requirement: "根据用户本集故事意图、项目总剧本和上一集内容，生成/完善当前单集结构化剧本。保持故事连贯、角色状态连续、容量适合后续拆成合理数量的 5-15 秒视频分镜。",
     languagePolicy: promptLanguagePolicy(config.project),
     rules: [
       "Return JSON only with shape { brief, script, selectedBeats, deferredBeats, capacityNote, sourceMode }.",
       "Do not rewrite the whole project; write only the current episode.",
-      "Use the inherited project video length as the target episode length.",
+      budgetPlan.isSmart
+        ? "The project length is Smart Recommendation. Do not inherit minute markers or timeline labels from the full project script as this episode's target length."
+        : "Use the configured project video length as the target episode length.",
+      `Target this episode at about ${budgetPlan.targetSec} seconds unless the user brief clearly requires less. Keep the expected shot count around ${budgetPlan.minShots}-${budgetPlan.maxShots}.`,
       sourceMode === "brief_guided"
         ? "The user brief is the priority direction. Preserve its core events, but trim or defer excessive content."
         : "The user did not provide a brief. Invent a concise episode brief from the project story, previous episode, ending hook, and existing assets.",
@@ -2564,7 +2576,9 @@ function buildEpisodeScriptPrompt(config, state, episodeInfo = {}) {
       "Use Simplified Chinese for non-spoken production fields so the user can review and edit the episode efficiently.",
       "Only dialogue[].text is spoken dialogue; write it in the project dialogue language and keep it concise for video voice generation.",
       "Do not put every possible idea into this episode. Select only the story beats that fit the target duration.",
-      "A 15s shot should carry one main story beat, 1-2 continuous actions, and 0-1 short dialogue line.",
+      "Ignore full-project timestamps such as 0:00-2:00, 2分钟, 120 seconds, or chapter-wide scene lists when deciding current-episode capacity.",
+      "selectedBeats should contain only beats that fit the current episode target. Put later beats into deferredBeats.",
+      "A video shot should carry one dramatic intention. Simple beats can become 5-10s shots; complete micro-beats can become 12-15s shots.",
       "Put overflow events, future reveals, or extra conflicts into deferredBeats instead of forcing them into the current episode."
     ],
     schema: {
@@ -2606,6 +2620,9 @@ function buildEpisodeScriptPrompt(config, state, episodeInfo = {}) {
       title: episodeInfo.title || `第 ${episodeInfo.order || 1} 集`,
       order: episodeInfo.order || 1,
       targetLength: config.project.videoLength || config.project.episodeDuration || "",
+      normalizedTargetSec: budgetPlan.targetSec,
+      expectedShotCount: `${budgetPlan.minShots}-${budgetPlan.maxShots}`,
+      capacityMode: budgetPlan.isSmart ? "smart-density" : "configured-duration",
       userBrief: episodeInfo.note || "",
       sourceMode
     },
@@ -2623,7 +2640,8 @@ function buildEpisodeScriptPrompt(config, state, episodeInfo = {}) {
 async function generateEpisodeScriptContent(config, state, episodeInfo = {}) {
   const prompt = buildEpisodeScriptPrompt(config, state, episodeInfo);
   const result = await callLlmJson(resolveModelAdapter(config, "episodeScriptLlm"), prompt, () => mockEpisodeScript(config, state, episodeInfo));
-  const script = normalizeScript(result.data?.script || result.data, {
+  const budgetPlan = episodeBudgetPlan(config.project, state.storyScript || scriptFromUserText(config.project.title || "未命名项目", config.project.logline || "", config), episodeInfo);
+  const rawScript = normalizeScript(result.data?.script || result.data, {
     ...config,
     project: {
       ...config.project,
@@ -2631,15 +2649,21 @@ async function generateEpisodeScriptContent(config, state, episodeInfo = {}) {
       logline: episodeInfo.note || config.project.logline
     }
   }, result.source);
+  const { script, deferredFromTrim } = normalizeEpisodeScriptForBudget(rawScript, budgetPlan);
   script.title = episodeInfo.title || script.title;
   script.adapterError = result.error || "";
   const sourceMode = stringOr(result.data?.sourceMode || result.data?.source_mode, episodeInfo.mode || (episodeInfo.note ? "brief_guided" : "auto_continue"));
+  const selectedBeats = normalizeStringList(result.data?.selectedBeats || result.data?.selected_beats).slice(0, budgetPlan.maxShots + 1);
+  const deferredBeats = [
+    ...normalizeStringList(result.data?.deferredBeats || result.data?.deferred_beats),
+    ...deferredFromTrim
+  ].slice(0, 20);
   return {
     script,
     brief: stringOr(result.data?.brief, episodeInfo.note || script.synopsis || ""),
-    selectedBeats: normalizeStringList(result.data?.selectedBeats || result.data?.selected_beats),
-    deferredBeats: normalizeStringList(result.data?.deferredBeats || result.data?.deferred_beats),
-    capacityNote: stringOr(result.data?.capacityNote || result.data?.capacity_note, ""),
+    selectedBeats,
+    deferredBeats,
+    capacityNote: normalizedCapacityNote(result.data?.capacityNote || result.data?.capacity_note, budgetPlan, script),
     sourceMode,
     source: result.source,
     adapterError: result.error || ""
@@ -2681,30 +2705,86 @@ function compactAssetCatalog(cards = {}) {
 }
 
 function buildShotsPrompt(config, script, episode = {}) {
+  const budgetPlan = episodeBudgetPlan(config.project, script, {
+    title: episode.title,
+    order: episode.order,
+    note: episode.brief || episode.synopsis || script.synopsis || ""
+  });
   return JSON.stringify({
-    task: "create_15s_video_shots",
+    task: "create_dynamic_video_shots",
     languagePolicy: promptLanguagePolicy(config.project),
     rules: [
       "Return JSON only with shape { shots: [...] }.",
-      "Each shot is one complete 15-second video segment.",
+      "Each shot is one complete 5-15 second video segment.",
+      "Do not force 6-10 shots. Let story density decide the number of shots.",
+      `Use about ${budgetPlan.minShots}-${budgetPlan.maxShots} shots for this episode unless the script has clearly fewer complete beats.`,
+      `The total shot duration should usually stay near ${budgetPlan.targetSec} seconds, not the full-project timeline length.`,
+      "Very simple episodes may use 1-3 shots; simple episodes may use 3-5 shots; standard episodes may use 5-8 shots; only complex episodes should use 8-10 shots.",
+      "One shot represents one dramatic intention, not one isolated physical action.",
+      "Merge continuous actions when they serve the same intention, stay in the same scene, and have only one core reveal or emotion turn.",
+      "Split actions when the goal changes, the scene changes, a new threat appears, a new key asset becomes the focus, or the character makes a new decision.",
+      "Use durationSec dynamically: 5-7 seconds for one small beat, 8-10 seconds for a standard beat with 1-2 actions, 12-15 seconds for one complete micro-beat with 2-4 continuous actions.",
+      "Do not pad simple content with empty shots, repeated reaction closeups, slow camera filler, or duplicated visual beats.",
+      "Do not compress too much content into a short shot. A 5-7 second shot must not contain multiple reveals, long dialogue, or multiple action goals.",
+      "The total duration of all shots should be close to the episode target duration when possible, but content clarity is more important than exact length.",
       "Do not create storyboard images or first-frame prompts here.",
-      "Include camera, action, dialogue, continuity, and asset-relevant visual notes for later Seedance prompt packages.",
-      "camera, action, assetNotes, visualNotes, and continuity are production guidance fields; prefer Simplified Chinese for easier user review.",
+      "Include camera, action, dialogue, continuity, entryBeat, mainBeat, exitBeat, cutRelation, cameraMotivation, pace, ellipsis, and asset-relevant visual notes for later Seedance prompt packages.",
+      "Each shot must have entryBeat/mainBeat/exitBeat: entryBeat explains how this shot enters from the previous shot, mainBeat is the core action, exitBeat is the ending state that guides the next shot.",
+      "Use normal editing language. Not every cut is seamless: choose continuous_action, reaction_cut, match_cut, time_cut, location_cut, montage, or reveal_cut.",
+      "If the previous shot ends with falling, impact, stun, teleport, explosion, or knockback, the next shot entryBeat must show recovery/orientation before complex action.",
+      "If a shot skips time, set ellipsis to slight, clear_time_jump, or montage_compression and explain the resulting state in entryBeat.",
+      "camera, action, assetNotes, visualNotes, continuity, and editing fields are production guidance fields; prefer Simplified Chinese for easier user review.",
       "dialogue is the only spoken text in the shot and must use the project dialogue language."
     ],
-    requirement: "把剧本拆成 6-10 个 15s 视频分镜，用于后续生成 Seedance 分镜提示词包。不要输出故事板图或首帧图提示词。输出 JSON: { shots: [...] }。",
+    requirement: "根据剧情容量把剧本拆成合理数量的 5-15 秒视频分镜，用于后续生成 Seedance 分镜提示词包。不要输出故事板图或首帧图提示词。输出 JSON: { shots: [...] }。",
+    densityGuide: {
+      shotCount: {
+        verySimple: "1-3 shots for one action goal or one emotional beat",
+        simple: "3-5 shots for 1-2 story beats",
+        standard: "5-8 shots for 3-5 story beats",
+        complex: "8-10 shots only when there are multiple scenes, conflicts, or turns"
+      },
+      durationSec: {
+        "5-7": "one small beat, one action or reaction, 0-1 very short dialogue line",
+        "8-10": "one standard beat, 1-2 continuous actions, 0-1 short dialogue line",
+        "12-15": "one complete micro-beat, 2-4 continuous actions, 0-1 emotion turn, 1-2 short dialogue lines"
+      },
+      combineWhen: [
+        "same scene",
+        "same character goal",
+        "same dramatic intention",
+        "actions are continuous and causal",
+        "one core reveal or one emotion turn"
+      ],
+      splitWhen: [
+        "scene changes",
+        "character goal changes",
+        "new threat appears",
+        "new key reference asset becomes the visual focus",
+        "new decision or story beat starts",
+        "content would exceed the duration budget"
+      ]
+    },
     shotSchema: {
       id: "SH01",
       sceneId: "SC01",
       order: 1,
-      durationSec: 15,
+      durationSec: "integer 5-15",
       shotType: "远景/中景/近景/特写",
       camera: "string",
       action: "string",
       dialogue: "string",
       assetNotes: "string",
       visualNotes: "string",
-      continuity: "string"
+      continuity: "string",
+      cutRelation: "continuous_action | reaction_cut | match_cut | time_cut | location_cut | montage | reveal_cut",
+      entryBeat: "string",
+      mainBeat: "string",
+      exitBeat: "string",
+      cameraMotivation: "follow_action | reveal_information | emphasize_threat | show_reaction | guide_attention | build_suspense | impact_aftershock | spatial_establish",
+      pace: "slow_tension | normal_action | quick_panic | impact_pause | montage_fast | emotional_hold",
+      ellipsis: "none | slight | clear_time_jump | montage_compression",
+      continuityCheck: "string"
     },
     visualStyle: config.project.visualStyle,
     aspectRatio: config.project.aspectRatio,
@@ -2712,7 +2792,10 @@ function buildShotsPrompt(config, script, episode = {}) {
     episode: {
       id: episode.id || "",
       title: episode.title || "",
-      order: episode.order || 1
+      order: episode.order || 1,
+      targetDurationSec: budgetPlan.targetSec,
+      expectedShotCount: `${budgetPlan.minShots}-${budgetPlan.maxShots}`,
+      capacityMode: budgetPlan.isSmart ? "smart-density" : "configured-duration"
     },
     script
   });
@@ -2770,16 +2853,23 @@ function buildCardsPrompt(config, script, shots, existingCards = {}, assetImages
 
 function buildPromptPackagesPrompt(config, shots, cards, assetImages, episode = {}) {
   return JSON.stringify({
-    task: "generate_15s_shot_prompt_packages_for_seedance",
+    task: "generate_dynamic_shot_prompt_packages_for_seedance",
     languagePolicy: promptLanguagePolicy(config.project),
     outputRules: [
       "Return JSON only. Do not return Markdown.",
       "Output shape must be { promptPackages: [...] }.",
-      "Each package represents one 15-second shot and must contain audio, dialogue, and 3-5 subShots.",
+      "Each package represents one video shot and must use that shot's durationSec exactly.",
+      "Each package must contain audio, dialogue, and subShots.",
       "Each subShot must contain timeRange, cameraLanguage, blocking, composition, action, and assetRefs.",
+      "Use shot.entryBeat, shot.mainBeat, and shot.exitBeat as the story skeleton: first subShot covers entryBeat, middle subShots cover mainBeat, final subShot covers exitBeat.",
+      "Respect shot.cutRelation, shot.cameraMotivation, shot.pace, and shot.ellipsis when designing camera language and timing.",
+      "Do not skip recovery/orientation in entryBeat after falling, impact, teleport, explosion, or knockback.",
       "Use only asset ids from availableAssets. Do not invent new asset ids.",
       "When availableAssets contains imageUrl, write the seedancePrompt so the video adapter can pair each asset id with its reference image.",
-      "For a 15s shot, prefer time ranges: 0.0-3.0, 3.0-7.0, 7.0-10.0, 10.0-15.0.",
+      "SubShot count should follow duration: 5-7s uses 2-3 subShots; 8-12s uses 3-4 subShots; 13-15s uses 4-5 subShots.",
+      "Time ranges must cover the full duration without exceeding durationSec.",
+      "For short shots, keep each subShot direct and executable. Do not squeeze extra story beats into a short duration.",
+      "Every major action or reveal described in the shot action must appear in at least one subShot. If a beat cannot fit, simplify within the same dramatic intention instead of adding unrelated filler.",
       "Keep continuity of character identity, prop positions, scene layout, human scale, and visual style.",
       "Do not create storyboard images or first-frame image prompts.",
       "soundDesign, audio.content, cameraLanguage, blocking, composition, and action are production guidance fields; prefer Simplified Chinese for user review.",
@@ -2790,16 +2880,16 @@ function buildPromptPackagesPrompt(config, shots, cards, assetImages, episode = 
     packageSchema: {
       id: "PKG-SH01",
       shotId: "SH01",
-      durationSec: 15,
+      durationSec: "same integer durationSec as input shot, 5-15",
       title: "string",
       soundDesign: "string",
-      audio: [{ timeRange: "0.0-3.0", content: "string", assetRefs: ["PROP01"] }],
-      dialogue: [{ timeRange: "0.6-2.2", speakerAssetId: "CHAR01", voice: "string", text: "string" }],
+      audio: [{ timeRange: "start-end within durationSec, allocated by sound importance", content: "string", assetRefs: ["PROP01"] }],
+      dialogue: [{ timeRange: "short spoken range within durationSec", speakerAssetId: "CHAR01", voice: "string", text: "string" }],
       assetRefs: ["CHAR01", "LOC01", "PROP01"],
       subShots: [
         {
           id: "SH01-01",
-          timeRange: "0.0-3.0",
+          timeRange: "start-end within durationSec, allocated by action weight",
           cameraLanguage: "string",
           blocking: "string",
           composition: "string",
@@ -2816,9 +2906,34 @@ function buildPromptPackagesPrompt(config, shots, cards, assetImages, episode = 
       title: episode.title || "",
       order: episode.order || 1
     },
-    shots,
+    shots: shots.map(compactShotForPromptPackage),
     availableAssets: availableAssetCatalog(cards, assetImages)
   });
+}
+
+function compactShotForPromptPackage(shot = {}) {
+  return {
+    id: shot.id || "",
+    sceneId: shot.sceneId || "",
+    order: shot.order || 1,
+    durationSec: normalizeClipDuration(shot.durationSec || 15),
+    shotType: shot.shotType || "",
+    camera: shot.camera || "",
+    action: shot.action || "",
+    dialogue: shot.dialogue || "",
+    assetRefs: Array.isArray(shot.assetRefs) ? shot.assetRefs : [],
+    visualNotes: shortText(shot.visualNotes || "", 240),
+    assetNotes: shortText(shot.assetNotes || "", 240),
+    continuity: shortText(shot.continuity || "", 240),
+    cutRelation: shot.cutRelation || "",
+    entryBeat: shot.entryBeat || "",
+    mainBeat: shot.mainBeat || shot.action || "",
+    exitBeat: shot.exitBeat || "",
+    cameraMotivation: shot.cameraMotivation || "",
+    pace: shot.pace || "",
+    ellipsis: shot.ellipsis || "",
+    continuityCheck: shot.continuityCheck || ""
+  };
 }
 
 function buildAssetImagePrompt(config, asset) {
@@ -3235,7 +3350,7 @@ function mockEpisodeScript(config, state, episodeInfo = {}) {
       "更大的秘密暂不完全揭晓",
       "最终对决延后到后续剧集"
     ],
-    capacityNote: "本集保留 4 个主要剧情 beat，适合后续拆成 6-10 个 15s 分镜；复杂冲突延后。",
+    capacityNote: "本集保留 4 个主要剧情 beat，适合后续拆成合理数量的 5-15 秒视频分镜；复杂冲突延后。",
     sourceMode: mode,
     script: {
       title: episodeInfo.title || `第 ${episodeInfo.order || 1} 集`,
@@ -3295,22 +3410,23 @@ function mockEpisodeScript(config, state, episodeInfo = {}) {
 
 function mockShots(config, script) {
   const templates = [
-    ["远景", "雨幕中缓慢推进", "城市巷口像一张发光的迷宫地图展开"],
-    ["近景", "手持晃动跟拍", "包裹裂缝亮起，倒计时映在主角眼睛里"],
-    ["中景", "横向追拍", "主角冲上旧电车天桥，追兵从屏幕里探出"],
-    ["特写", "快速推近", "追兵的手擦过包裹，记忆画面闪回一帧"],
-    ["大全景", "升镜头", "信号塔刺破云层，整座城市短暂静音"],
-    ["近景", "环绕半圈后定格", "芯片插入塔顶，主角看见自己的童年影像"]
+    ["远景", "雨幕中缓慢推进", "城市巷口像一张发光的迷宫地图展开", 8],
+    ["近景", "手持晃动跟拍", "包裹裂缝亮起，倒计时映在主角眼睛里", 7],
+    ["中景", "横向追拍", "主角冲上旧电车天桥，追兵从屏幕里探出", 10],
+    ["特写", "快速推近", "追兵的手擦过包裹，记忆画面闪回一帧", 6],
+    ["大全景", "升镜头", "信号塔刺破云层，整座城市短暂静音", 12],
+    ["近景", "环绕半圈后定格", "芯片插入塔顶，主角看见自己的童年影像", 10]
   ];
   const scenes = script.scenes || [];
+  const targetCount = scenes.length <= 1 ? 2 : scenes.length === 2 ? 4 : 6;
   return {
-    shots: templates.map((template, index) => {
+    shots: templates.slice(0, targetCount).map((template, index) => {
       const scene = scenes[Math.min(Math.floor(index / 2), Math.max(scenes.length - 1, 0))] || scenes[0] || {};
       return {
         id: `SH${String(index + 1).padStart(2, "0")}`,
         sceneId: scene.id || "SC01",
         order: index + 1,
-        durationSec: 15,
+        durationSec: template[3],
         shotType: template[0],
         camera: template[1],
         action: template[2],
@@ -3382,57 +3498,60 @@ function mockPromptPackages(config, shots, cards, assetImages) {
       const loc = locations[index % Math.max(locations.length, 1)] || locations[0] || {};
       const prop = props[index % Math.max(props.length, 1)] || props[0] || {};
       const refs = [char.id, loc.id, prop.id].filter(Boolean);
+      const durationSec = normalizeClipDuration(shot.durationSec || 15);
+      const ranges = defaultSubShotRanges(durationSec);
+      const beats = ranges.map((range, subIndex) => subShotActionFromEditingBeat(shot, subIndex, ranges.length));
       return {
         id: `PKG-${shot.id}`,
         shotId: shot.id,
-        durationSec: 15,
+        durationSec,
         title: `${shot.id} Seedance prompt package`,
         soundDesign: "Layered room tone, key action sound effects, and short emotional accents synced to each sub-shot.",
         audio: [
-          { timeRange: "0.0-3.0", content: `Establish ambience for ${loc.name || "the scene"} with subtle tension.`, assetRefs: [loc.id].filter(Boolean) },
-          { timeRange: "3.0-7.0", content: `Emphasize action sound for ${prop.name || "key prop"}.`, assetRefs: [prop.id].filter(Boolean) }
+          { timeRange: ranges[0] || defaultSubShotRange(0, durationSec), content: `Establish ambience for ${loc.name || "the scene"} with subtle tension.`, assetRefs: [loc.id].filter(Boolean) },
+          { timeRange: ranges[1] || defaultSubShotRange(1, durationSec), content: `Emphasize action sound for ${prop.name || "key prop"}.`, assetRefs: [prop.id].filter(Boolean) }
         ],
         dialogue: shot.dialogue ? [
-          { timeRange: "0.6-2.2", speakerAssetId: char.id || "", voice: "young, emotional, clear delivery", text: shot.dialogue }
+          { timeRange: ranges[0] || defaultSubShotRange(0, durationSec), speakerAssetId: char.id || "", voice: "young, emotional, clear delivery", text: shot.dialogue }
         ] : [],
-        subShots: [
+        subShots: ranges.map((range, subIndex) => [
           {
             id: `${shot.id}-01`,
-            timeRange: "0.0-3.0",
-            cameraLanguage: `Fade in, fast push-in, ${shot.camera || "controlled camera move"}.`,
+            timeRange: range,
+            cameraLanguage: `${shot.camera || "controlled camera move"}; editing relation ${shot.cutRelation || "continuous_action"}; motivation ${shot.cameraMotivation || "follow_action"}.`,
             blocking: `${char.name || "main character"} starts in ${loc.name || "the scene"}, key props remain visible.`,
             composition: `Establish ${loc.name || "environment"} and keep asset identity consistent with references.`,
-            action: shot.action,
+            action: beats[subIndex] || shot.action,
             assetRefs: refs
           },
           {
             id: `${shot.id}-02`,
-            timeRange: "3.0-7.0",
+            timeRange: range,
             cameraLanguage: "Cut to a closer angle with stable continuity.",
             blocking: "Keep character position and prop placement consistent.",
             composition: "Readable face, clear hands, foreground prop visible.",
-            action: `${shot.action} Continue the action beat with stronger tension.`,
+            action: beats[subIndex] || `${shot.action} Continue the action beat with stronger tension.`,
             assetRefs: refs
           },
           {
             id: `${shot.id}-03`,
-            timeRange: "7.0-10.0",
+            timeRange: range,
             cameraLanguage: "Rapid push-in or match cut for the key turning point.",
             blocking: "Keep all referenced assets in plausible spatial relation.",
             composition: "Focus on the trigger prop or emotional reaction.",
-            action: shot.continuity || shot.videoPrompt || shot.action,
+            action: beats[subIndex] || shot.continuity || shot.videoPrompt || shot.action,
             assetRefs: refs
           },
           {
             id: `${shot.id}-04`,
-            timeRange: "10.0-15.0",
+            timeRange: range,
             cameraLanguage: "Slow push-in, rack focus, hold final impact.",
             blocking: "End pose clearly shows the result of the action.",
             composition: "Cinematic stillness, consistent style, no new characters.",
-            action: `${shot.action} Resolve this 15-second shot and preserve continuity for the next shot.`,
+            action: beats[subIndex] || `${shot.action} Resolve this shot and preserve continuity for the next shot.`,
             assetRefs: refs
           }
-        ],
+        ][Math.min(subIndex, 3)]).map((subShot, subIndex) => ({ ...subShot, id: `${shot.id}-${String(subIndex + 1).padStart(2, "0")}` })),
         seedancePrompt: buildSeedancePromptFromParts(shot, refs, assets, assetImages)
       };
     })
@@ -3618,15 +3737,80 @@ function normalizeScript(data, config, source) {
   };
 }
 
+function episodeBudgetPlan(project = {}, script = {}, episodeInfo = {}) {
+  const rawLength = stringOr(project.videoLength || project.episodeDuration, "");
+  const isSmart = !rawLength || /智能|自动|推荐|smart|auto/i.test(rawLength);
+  const briefText = stringOr(episodeInfo.note || episodeInfo.brief || episodeInfo.synopsis, "");
+  const textForDensity = briefText || [
+    script.title,
+    script.logline,
+    script.synopsis,
+    script.episodeGoal,
+    ...(Array.isArray(script.scenes) ? script.scenes.flatMap((scene) => [
+      scene.title,
+      scene.action,
+      scene.narration,
+      ...(Array.isArray(scene.dialogue) ? scene.dialogue.map((line) => line.text) : [])
+    ]) : [])
+  ].filter(Boolean).join(" ");
+  const density = estimateStoryBeatDensity(textForDensity);
+  const configuredSec = parseDurationSeconds(rawLength);
+  const smartTargetRaw = density <= 2 ? 25 : density <= 4 ? 40 : density <= 6 ? 55 : 75;
+  const smartTarget = briefText ? smartTargetRaw : Math.min(55, smartTargetRaw);
+  const targetSec = isSmart ? smartTarget : clampNumber(configuredSec || smartTarget, 20, 120);
+  const suggestedMax = Math.max(1, Math.min(10, Math.ceil(targetSec / 12)));
+  const minShots = targetSec <= 30 ? 1 : targetSec <= 50 ? 2 : targetSec <= 70 ? 3 : 4;
+  const maxShots = Math.max(minShots, Math.min(suggestedMax, density <= 2 ? 3 : density <= 4 ? 5 : density <= 7 ? 7 : 10));
+  return { isSmart, targetSec, minShots, maxShots, density };
+}
+
+function normalizeEpisodeScriptForBudget(script = {}, budgetPlan = {}) {
+  const scenes = Array.isArray(script.scenes) ? script.scenes : [];
+  const maxScenes = Math.max(1, Math.min(scenes.length || 1, budgetPlan.maxShots || 5));
+  const nextScenes = scenes.slice(0, maxScenes);
+  const deferredFromTrim = scenes.slice(maxScenes).map((scene) => `顺延：${scene.title || scene.action || scene.id || "后续剧情"}`);
+  return {
+    script: { ...script, scenes: nextScenes },
+    deferredFromTrim
+  };
+}
+
+function normalizedCapacityNote(originalNote = "", budgetPlan = {}, script = {}) {
+  const sceneCount = Array.isArray(script.scenes) ? script.scenes.length : 0;
+  const sourceNote = stringOr(originalNote, "");
+  const oldTemplate = /15\s*秒|15s|6-10|2\s*分钟|120\s*秒|约\s*2\s*分钟/i.test(sourceNote);
+  const base = `按当前本集剧情密度推荐约 ${budgetPlan.targetSec || 40} 秒，预计拆为 ${budgetPlan.minShots || 1}-${budgetPlan.maxShots || 5} 个 5-15 秒视频分镜；当前保留 ${sceneCount} 个核心场景/剧情节拍，超出容量的内容顺延到后续集。`;
+  return oldTemplate || !sourceNote ? base : `${base} 原模型说明：${sourceNote}`;
+}
+
+function clampNumber(value, min, max) {
+  const number = Number(value);
+  const safe = Number.isFinite(number) ? number : min;
+  return Math.max(min, Math.min(max, safe));
+}
+
+function estimateStoryBeatDensity(text = "") {
+  const normalizedText = String(text || "").replace(/\s+/g, "");
+  if (!normalizedText) return 2;
+  let score = Math.min(6, Math.ceil(normalizedText.length / 70));
+  const separators = normalizedText.match(/[，。；、,.!?！？]/g) || [];
+  score += Math.min(3, Math.ceil(separators.length / 6));
+  const beatTerms = ["发现", "逃", "追", "战斗", "唤醒", "出现", "破", "偷", "拿", "救", "反转", "决定", "危机", "结尾", "钩子"];
+  score += Math.min(4, beatTerms.filter((term) => normalizedText.includes(term)).length);
+  return Math.max(1, score);
+}
+
 function normalizeShots(data, script, config, source) {
   const inputShots = Array.isArray(data?.shots) ? data.shots : Array.isArray(data) ? data : [];
-  return inputShots.slice(0, 12).map((shot, index) => {
+  const slicedShots = inputShots.slice(0, 12);
+  const normalizedShots = slicedShots.map((shot, index) => {
     const scene = (script.scenes || []).find((item) => item.id === shot.sceneId) || script.scenes?.[Math.min(index, script.scenes.length - 1)] || {};
+    const durationSec = normalizeGeneratedShotDuration(shot, scene, script, config, slicedShots);
     return {
       id: stringOr(shot.id, `SH${String(index + 1).padStart(2, "0")}`),
       sceneId: stringOr(shot.sceneId, scene.id || "SC01"),
       order: Number(shot.order || index + 1),
-      durationSec: 15,
+      durationSec,
       shotType: stringOr(shot.shotType, shot.size || "中景"),
       camera: stringOr(shot.camera, "轻微推进"),
       action: stringOr(shot.action, scene.action || ""),
@@ -3637,9 +3821,291 @@ function normalizeShots(data, script, config, source) {
       imagePrompt: stringOr(shot.imagePrompt, `${config.project.visualStyle}，${shot.action || scene.action || ""}`),
       videoPrompt: stringOr(shot.videoPrompt, `${shot.camera || "轻微推进"}，${shot.action || scene.action || ""}`),
       continuity: stringOr(shot.continuity, `延续 ${scene.title || "上一场"}。`),
+      cutRelation: normalizeCutRelation(shot.cutRelation || shot.cut_relation, index),
+      entryBeat: stringOr(shot.entryBeat || shot.entry_beat, ""),
+      mainBeat: stringOr(shot.mainBeat || shot.main_beat, shot.action || scene.action || ""),
+      exitBeat: stringOr(shot.exitBeat || shot.exit_beat, ""),
+      cameraMotivation: normalizeCameraMotivation(shot.cameraMotivation || shot.camera_motivation, shot),
+      pace: normalizePace(shot.pace, shot),
+      ellipsis: normalizeEllipsis(shot.ellipsis),
+      continuityCheck: stringOr(shot.continuityCheck || shot.continuity_check, ""),
       source
     };
   });
+  return normalizeShotContinuitySequence(rebalanceShotPlanForBudget(normalizedShots, script, config));
+}
+
+function normalizeGeneratedShotDuration(shot = {}, scene = {}, script = {}, config = DEFAULT_CONFIG, allShots = []) {
+  const requested = normalizeClipDuration(shot.durationSec || shot.duration || shot.seconds || 15);
+  const budgetText = [
+    shot.action || scene.action,
+    shot.dialogue
+  ].filter(Boolean).join(" ");
+  const dialogueText = [shot.dialogue, ...(Array.isArray(scene.dialogue) ? scene.dialogue.map((line) => line.text) : [])].filter(Boolean).join(" ");
+  const targetEpisodeSec = parseDurationSeconds(config.project?.videoLength || config.project?.episodeDuration || "");
+  const allDefaultMax = allShots.length > 1 && allShots.every((item) => normalizeClipDuration(item.durationSec || item.duration || item.seconds || 15) >= 15);
+  const generatedTotal = allShots.reduce((sum, item) => sum + normalizeClipDuration(item.durationSec || item.duration || item.seconds || 15), 0);
+  const clearlyOverTarget = targetEpisodeSec > 0 && generatedTotal > Math.max(targetEpisodeSec * 1.25, targetEpisodeSec + 10);
+  const compactShotPlan = allShots.length <= 4 && allDefaultMax;
+  const simpleScript = estimateScriptDensity(script) <= 260 && allShots.length <= 4;
+  const shouldRebalance = requested >= 15 && (compactShotPlan || clearlyOverTarget || simpleScript);
+  if (!shouldRebalance) {
+    return requested;
+  }
+  return estimateClipDurationFromBudget(budgetText, dialogueText);
+}
+
+function rebalanceShotPlanForBudget(shots = [], script = {}, config = DEFAULT_CONFIG) {
+  const compacted = compactShotPlanToBudget(shots, script, config);
+  return rebalanceCompactShotDurations(compacted, script, config);
+}
+
+function compactShotPlanToBudget(shots = [], script = {}, config = DEFAULT_CONFIG) {
+  const normalizedShots = (Array.isArray(shots) ? shots : []).map((shot) => ({
+    ...shot,
+    durationSec: normalizeClipDuration(shot.durationSec || shot.duration || 15)
+  })).filter((shot) => shot.id);
+  if (normalizedShots.length <= 1) {
+    return normalizedShots;
+  }
+  const budgetPlan = episodeBudgetPlan(config.project || {}, script, {});
+  const currentTotal = normalizedShots.reduce((sum, shot) => sum + normalizeClipDuration(shot.durationSec || 15), 0);
+  const overBudget = currentTotal > Math.max(budgetPlan.targetSec * 1.25, budgetPlan.targetSec + 15);
+  const oldMaxTemplate = normalizedShots.length >= 5 && normalizedShots.every((shot) => normalizeClipDuration(shot.durationSec || 15) >= 15);
+  const shouldCompact = overBudget || (budgetPlan.isSmart && oldMaxTemplate && normalizedShots.length > budgetPlan.maxShots);
+  if (!shouldCompact) {
+    return normalizedShots.map((shot) => ({
+      ...shot,
+      durationSec: estimateClipDurationFromBudget([shot.action, shot.dialogue].filter(Boolean).join(" "), shot.dialogue || "")
+    }));
+  }
+  const targetCount = Math.max(1, Math.min(budgetPlan.maxShots || normalizedShots.length, normalizedShots.length));
+  return groupItemsByTargetCount(normalizedShots, targetCount).map((group, index) => mergeShotGroup(group, index));
+}
+
+function groupItemsByTargetCount(items = [], targetCount = 1) {
+  const count = Math.max(1, Math.min(targetCount, items.length || 1));
+  const groups = Array.from({ length: count }, () => []);
+  items.forEach((item, index) => {
+    const groupIndex = Math.min(count - 1, Math.floor(index * count / items.length));
+    groups[groupIndex].push(item);
+  });
+  return groups.filter((group) => group.length);
+}
+
+function mergeShotGroup(group = [], index = 0) {
+  const first = group[0] || {};
+  const action = group.map((shot) => stringOr(shot.action, "")).filter(Boolean).join("；随后");
+  const dialogue = group.map((shot) => stringOr(shot.dialogue, "")).filter(Boolean).slice(0, 2).join(" / ");
+  const entryBeat = stringOr(first.entryBeat, first.action || "");
+  const exitBeat = stringOr(group[group.length - 1]?.exitBeat, group[group.length - 1]?.action || "");
+  return {
+    ...first,
+    id: `SH${String(index + 1).padStart(2, "0")}`,
+    order: index + 1,
+    durationSec: estimateClipDurationFromBudget([action, dialogue].filter(Boolean).join(" "), dialogue),
+    shotType: first.shotType || "中景",
+    camera: group.map((shot) => stringOr(shot.camera, "")).filter(Boolean).slice(0, 2).join("，") || first.camera || "轻微推进",
+    action: action || first.action || "",
+    dialogue,
+    assetNotes: group.map((shot) => stringOr(shot.assetNotes, "")).filter(Boolean).join("；"),
+    assetRefs: [...new Set(group.flatMap((shot) => Array.isArray(shot.assetRefs) ? shot.assetRefs : []))],
+    visualNotes: group.map((shot) => stringOr(shot.visualNotes, "")).filter(Boolean).join("；"),
+    continuity: group.map((shot) => stringOr(shot.continuity, "")).filter(Boolean).join("；"),
+    cutRelation: first.cutRelation || "continuous_action",
+    entryBeat,
+    mainBeat: action || first.mainBeat || "",
+    exitBeat,
+    cameraMotivation: first.cameraMotivation || normalizeCameraMotivation("", first),
+    pace: first.pace || normalizePace("", first),
+    ellipsis: first.ellipsis || "none",
+    continuityCheck: group.map((shot) => stringOr(shot.continuityCheck, "")).filter(Boolean).join("；")
+  };
+}
+
+function normalizeShotContinuitySequence(shots = []) {
+  return (Array.isArray(shots) ? shots : []).map((shot, index, all) => {
+    const previous = index > 0 ? all[index - 1] : null;
+    const next = {
+      ...shot,
+      cutRelation: normalizeCutRelation(shot.cutRelation, index),
+      cameraMotivation: normalizeCameraMotivation(shot.cameraMotivation, shot),
+      pace: normalizePace(shot.pace, shot),
+      ellipsis: normalizeEllipsis(shot.ellipsis)
+    };
+    next.mainBeat = stringOr(next.mainBeat, next.action || "");
+    next.entryBeat = stringOr(next.entryBeat, inferEntryBeat(next, previous, index));
+    next.exitBeat = stringOr(next.exitBeat, inferExitBeat(next));
+    next.continuityCheck = stringOr(next.continuityCheck, continuityCheckForShot(next, previous));
+    next.continuity = stringOr(next.continuity, continuityFromEditingFields(next, previous));
+    return next;
+  });
+}
+
+function normalizeCutRelation(value = "", index = 0) {
+  const normalized = String(value || "").trim().toLowerCase();
+  const allowed = new Set(["continuous_action", "reaction_cut", "match_cut", "time_cut", "location_cut", "montage", "reveal_cut"]);
+  if (allowed.has(normalized)) return normalized;
+  return index === 0 ? "location_cut" : "continuous_action";
+}
+
+function normalizeCameraMotivation(value = "", shot = {}) {
+  const normalized = String(value || "").trim().toLowerCase();
+  const allowed = new Set(["follow_action", "reveal_information", "emphasize_threat", "show_reaction", "guide_attention", "build_suspense", "impact_aftershock", "spatial_establish"]);
+  if (allowed.has(normalized)) return normalized;
+  const text = [shot.action, shot.mainBeat, shot.visualNotes].filter(Boolean).join("");
+  if (/发现|出现|显现|揭示|reveal/i.test(text)) return "reveal_information";
+  if (/威胁|追|攻击|boss|怪物|dragon|threat/i.test(text)) return "emphasize_threat";
+  if (/摔|坠|爆|震|冲击|impact/i.test(text)) return "impact_aftershock";
+  return "follow_action";
+}
+
+function normalizePace(value = "", shot = {}) {
+  const normalized = String(value || "").trim().toLowerCase();
+  const allowed = new Set(["slow_tension", "normal_action", "quick_panic", "impact_pause", "montage_fast", "emotional_hold"]);
+  if (allowed.has(normalized)) return normalized;
+  const text = [shot.action, shot.mainBeat, shot.visualNotes].filter(Boolean).join("");
+  if (/摔|坠|爆|震|冲击|昏|醒|impact/i.test(text)) return "impact_pause";
+  if (/追|逃|冲|慌|panic|run/i.test(text)) return "quick_panic";
+  if (/蒙太奇|采集|快速|montage/i.test(text)) return "montage_fast";
+  if (/看着|怔|犹豫|沉默|反应/.test(text)) return "emotional_hold";
+  return "normal_action";
+}
+
+function normalizeEllipsis(value = "") {
+  const normalized = String(value || "").trim().toLowerCase();
+  const allowed = new Set(["none", "slight", "clear_time_jump", "montage_compression"]);
+  return allowed.has(normalized) ? normalized : "none";
+}
+
+function inferEntryBeat(shot = {}, previous = null, index = 0) {
+  if (!previous || index === 0) {
+    return `建立当前场景和角色状态：${shot.mainBeat || shot.action || ""}`.trim();
+  }
+  const previousExit = previous.exitBeat || previous.action || previous.continuity || "";
+  if (needsRecoveryEntry(previousExit)) {
+    return `承接上一镜结果：角色先从${shortText(previousExit, 42)}后的状态恢复、确认环境，再进入本镜头动作。`;
+  }
+  if (shot.cutRelation === "time_cut") {
+    return `经过短暂省略后，从上一镜结果${shortText(previousExit, 42)}之后的状态进入。`;
+  }
+  if (shot.cutRelation === "reaction_cut") {
+    return `先表现角色对上一镜结果的反应：${shortText(previousExit, 48)}。`;
+  }
+  return `承接上一镜结尾状态：${shortText(previousExit, 54)}。`;
+}
+
+function inferExitBeat(shot = {}) {
+  const text = shot.mainBeat || shot.action || "";
+  if (!text) return "";
+  return `本镜结束时留下状态：${shortText(text, 76)}。`;
+}
+
+function continuityCheckForShot(shot = {}, previous = null) {
+  if (!previous) return "首个分镜负责建立场景、角色状态和关键空间关系。";
+  const previousExit = previous.exitBeat || previous.action || "";
+  if (needsRecoveryEntry(previousExit)) {
+    return "上一镜包含摔落/冲击/传送/爆发，本镜开头必须先恢复、醒来或确认环境，不能直接执行复杂动作。";
+  }
+  if (shot.ellipsis !== "none") {
+    return "本镜存在剪辑省略，entryBeat 必须说明省略后的状态。";
+  }
+  return "本镜开头需承接上一镜结果，再进入核心动作。";
+}
+
+function continuityFromEditingFields(shot = {}, previous = null) {
+  const chunks = [
+    previous?.exitBeat ? `承接上一镜：${previous.exitBeat}` : "",
+    shot.entryBeat ? `入镜：${shot.entryBeat}` : "",
+    shot.exitBeat ? `出镜：${shot.exitBeat}` : ""
+  ];
+  return chunks.filter(Boolean).join("；");
+}
+
+function needsRecoveryEntry(text = "") {
+  return /摔|坠|跌|倒|昏|醒|爆|震|冲击|传送|吸入|击退|knock|fall|impact|teleport|explode/i.test(String(text || ""));
+}
+
+function shortText(value = "", max = 60) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+function rebalanceCompactShotDurations(shots = [], script = {}, config = DEFAULT_CONFIG) {
+  const normalizedShots = (Array.isArray(shots) ? shots : []).map((shot) => ({
+    ...shot,
+    durationSec: normalizeClipDuration(shot.durationSec || shot.duration || 15)
+  }));
+  if (normalizedShots.length < 2 || normalizedShots.length > 4) {
+    return normalizedShots;
+  }
+  const allMax = normalizedShots.every((shot) => normalizeClipDuration(shot.durationSec || 15) >= 15);
+  if (!allMax) {
+    return normalizedShots;
+  }
+  const targetEpisodeSec = parseDurationSeconds(config.project?.videoLength || config.project?.episodeDuration || "");
+  const generatedTotal = normalizedShots.reduce((sum, shot) => sum + normalizeClipDuration(shot.durationSec || 15), 0);
+  const clearlyOverTarget = targetEpisodeSec > 0 && generatedTotal > Math.max(targetEpisodeSec * 1.25, targetEpisodeSec + 10);
+  const simpleScript = estimateScriptDensity(script) <= 260;
+  if (!clearlyOverTarget && !simpleScript) {
+    return normalizedShots;
+  }
+  return normalizedShots.map((shot) => ({
+    ...shot,
+    durationSec: estimateClipDurationFromBudget([shot.action, shot.dialogue].filter(Boolean).join(" "), shot.dialogue || "")
+  }));
+}
+
+function estimateClipDurationFromBudget(text = "", dialogueText = "") {
+  const normalizedText = String(text || "").replace(/\s+/g, "");
+  const normalizedDialogue = String(dialogueText || "").replace(/\s+/g, "");
+  // Avoid language-specific keyword matching here: generated scripts may be Chinese,
+  // English, or mixed, and Windows shells can mangle non-ASCII during tests.
+  if (normalizedText.length >= 150 || normalizedDialogue.length >= 64) return 15;
+  if (normalizedText.length >= 96 || normalizedDialogue.length >= 42) return 12;
+  if (normalizedText.length >= 48 || normalizedDialogue.length >= 18) return 10;
+  if (normalizedText.length >= 20 || normalizedDialogue.length > 0) return 8;
+  return 6;
+}
+
+function estimateShotDensity(text = "", dialogueText = "") {
+  const normalizedText = String(text || "").replace(/\s+/g, "");
+  const normalizedDialogue = String(dialogueText || "").replace(/\s+/g, "");
+  let score = 0;
+  score += Math.min(4, Math.ceil(normalizedText.length / 70));
+  score += Math.min(2, Math.ceil(normalizedDialogue.length / 32));
+  const actionTerms = ["进入", "发现", "靠近", "触碰", "发光", "震动", "后退", "逃跑", "出现", "破门", "转身", "拿起", "追逐", "攻击", "打开", "关闭", "跌倒", "冲出"];
+  score += Math.min(4, actionTerms.filter((term) => normalizedText.includes(term)).length);
+  const revealTerms = ["突然", "意识到", "真相", "秘密", "反转", "危机", "怪物", "异常", "钩子", "悬念"];
+  score += Math.min(2, revealTerms.filter((term) => normalizedText.includes(term)).length);
+  return score;
+}
+
+function estimateScriptDensity(script = {}) {
+  const text = [
+    script.title,
+    script.logline,
+    script.synopsis,
+    script.episodeGoal,
+    ...(Array.isArray(script.scenes) ? script.scenes.flatMap((scene) => [
+      scene.title,
+      scene.action,
+      scene.narration,
+      scene.visualNotes,
+      ...(Array.isArray(scene.dialogue) ? scene.dialogue.map((line) => line.text) : [])
+    ]) : [])
+  ].filter(Boolean).join("");
+  return String(text || "").replace(/\s+/g, "").length;
+}
+
+function parseDurationSeconds(value = "") {
+  const text = String(value || "").trim();
+  const match = text.match(/(\d+(?:\.\d+)?)/);
+  if (!match) return 0;
+  const number = Number(match[1]);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  if (/分钟|分|min|minute/i.test(text)) return Math.round(number * 60);
+  return Math.round(number);
 }
 
 function normalizeCards(data, config, source) {
@@ -3959,6 +4425,8 @@ function normalizePromptPackages(data, shots, cards, assetImages, source, adapte
     const shot = matchedShot || shots[index] || {};
     if (!shot.id) return null;
     const subShots = Array.isArray(item.subShots) ? item.subShots : Array.isArray(item.sub_shots) ? item.sub_shots : [];
+    const durationSec = normalizeClipDuration(shot.durationSec || item.durationSec || item.duration || 15);
+    const normalizedSubShots = normalizeSubShotsForDuration(subShots, shot, validAssetIds, durationSec);
     const normalized = {
       id: `PKG-${shot.id}`,
       shotId: shot.id,
@@ -3968,20 +4436,12 @@ function normalizePromptPackages(data, shots, cards, assetImages, source, adapte
         name: videoProfile?.name || "Seedance 2.0"
       },
       schemaVersion: stringOr(item.schemaVersion, videoProfile?.promptSchema || "seedance-prompt-package-v1"),
-      durationSec: Number(item.durationSec || item.duration || 15),
+      durationSec,
       title: stringOr(item.title, `${shot.id || ""} prompt package`),
       soundDesign: stringOr(item.soundDesign, item.sound_design || ""),
-      audio: normalizeTimedRows(item.audio, validAssetIds),
-      dialogue: normalizeDialogueRows(item.dialogue, validAssetIds),
-      subShots: subShots.map((subShot, subIndex) => ({
-        id: stringOr(subShot.id, `${shot.id || "SH"}-${String(subIndex + 1).padStart(2, "0")}`),
-        timeRange: stringOr(subShot.timeRange, subShot.time_range || defaultSubShotRange(subIndex)),
-        cameraLanguage: stringOr(subShot.cameraLanguage, subShot.camera || subShot.camera_language || ""),
-        blocking: stringOr(subShot.blocking, subShot.position || ""),
-        composition: stringOr(subShot.composition, subShot.framing || ""),
-        action: stringOr(subShot.action, ""),
-        assetRefs: filterAssetRefs(subShot.assetRefs || subShot.asset_refs || [], validAssetIds)
-      })),
+      audio: normalizeTimedRows(item.audio, validAssetIds, durationSec),
+      dialogue: normalizeDialogueRows(item.dialogue, validAssetIds, durationSec),
+      subShots: normalizedSubShots,
       seedancePrompt: stringOr(item.seedancePrompt, item.seedance_prompt || ""),
       assetRefs: filterAssetRefs(item.assetRefs || item.asset_refs || [], validAssetIds),
       source,
@@ -4060,17 +4520,118 @@ function nextManualAssetId(cards = {}, type = "prop") {
   return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-function normalizeTimedRows(rows, validAssetIds) {
+function normalizeTimedRows(rows, validAssetIds, durationSec = 15) {
   return (Array.isArray(rows) ? rows : []).map((row, index) => ({
-    timeRange: stringOr(row.timeRange, row.time_range || defaultSubShotRange(index)),
+    timeRange: normalizeTimeRange(row.timeRange || row.time_range, index, durationSec),
     content: stringOr(row.content, row.text || ""),
     assetRefs: filterAssetRefs(row.assetRefs || row.asset_refs || [], validAssetIds)
   }));
 }
 
-function normalizeDialogueRows(rows, validAssetIds) {
+function normalizeSubShotsForDuration(subShots = [], shot = {}, validAssetIds = new Set(), durationSec = 15) {
+  const input = (Array.isArray(subShots) ? subShots : []).map((subShot, subIndex) => ({
+    id: stringOr(subShot.id, `${shot.id || "SH"}-${String(subIndex + 1).padStart(2, "0")}`),
+    timeRange: normalizeTimeRange(subShot.timeRange || subShot.time_range, subIndex, durationSec),
+    cameraLanguage: stringOr(subShot.cameraLanguage, subShot.camera || subShot.camera_language || ""),
+    blocking: stringOr(subShot.blocking, subShot.position || ""),
+    composition: stringOr(subShot.composition, subShot.framing || ""),
+    action: stringOr(subShot.action, ""),
+    assetRefs: filterAssetRefs(subShot.assetRefs || subShot.asset_refs || [], validAssetIds)
+  }));
+  const fallback = defaultSubShotRows(shot, validAssetIds, durationSec);
+  const rows = input.length ? input : fallback;
+  if (!subShotRangesNeedReflow(rows, durationSec)) {
+    return rows;
+  }
+  const ranges = weightedSubShotRanges(rows, durationSec);
+  return rows.map((row, index) => ({
+    ...row,
+    id: row.id || `${shot.id || "SH"}-${String(index + 1).padStart(2, "0")}`,
+    timeRange: ranges[index] || defaultSubShotRange(index, durationSec)
+  }));
+}
+
+function defaultSubShotRows(shot = {}, validAssetIds = new Set(), durationSec = 15) {
+  const ranges = defaultSubShotRanges(durationSec);
+  return ranges.map((range, index) => ({
+    id: `${shot.id || "SH"}-${String(index + 1).padStart(2, "0")}`,
+    timeRange: range,
+    cameraLanguage: index === 0 ? stringOr(shot.camera, "建立镜头") : cameraLanguageForSubShot(shot, index, ranges.length),
+    blocking: "",
+    composition: "",
+    action: subShotActionFromEditingBeat(shot, index, ranges.length),
+    assetRefs: filterAssetRefs(shot.assetRefs || [], validAssetIds)
+  }));
+}
+
+function cameraLanguageForSubShot(shot = {}, index = 0, total = 1) {
+  if (index === 0) return `${shot.camera || "建立镜头"}；动机：${shot.cameraMotivation || "follow_action"}`;
+  if (index === total - 1) return `收束到出镜状态；节奏：${shot.pace || "normal_action"}`;
+  return `${shot.camera || "连续镜头"}；围绕核心动作推进`;
+}
+
+function subShotActionFromEditingBeat(shot = {}, index = 0, total = 1) {
+  if (index === 0) return shot.entryBeat || shot.mainBeat || shot.action || "";
+  if (index === total - 1) return shot.exitBeat || shot.mainBeat || shot.action || "";
+  return shot.mainBeat || shot.action || "";
+}
+
+function subShotRangesNeedReflow(rows = [], durationSec = 15) {
+  const duration = normalizeClipDuration(durationSec);
+  if (!rows.length) return true;
+  const parsed = rows.map((row) => parseTimeRange(row.timeRange)).filter(Boolean);
+  if (parsed.length !== rows.length) return true;
+  const maxEnd = Math.max(...parsed.map((range) => range.end));
+  const minStart = Math.min(...parsed.map((range) => range.start));
+  if (minStart > 0.2 || Math.abs(maxEnd - duration) > 0.2) return true;
+  if (parsed.some((range) => range.end > duration || range.start >= range.end)) return true;
+  const signature = rows.map((row) => row.timeRange).join("|");
+  if (duration !== 15 && /10\.0-15\.0|0\.0-3\.0\|3\.0-7\.0\|7\.0-10\.0\|10\.0-15\.0/.test(signature)) return true;
+  return duration === 15 && signature === "0.0-3.0|3.0-7.0|7.0-10.0|10.0-15.0";
+}
+
+function weightedSubShotRanges(rows = [], durationSec = 15) {
+  const duration = normalizeClipDuration(durationSec);
+  const maxRows = duration <= 6 ? 2 : duration <= 8 ? 3 : duration <= 12 ? 4 : 5;
+  const selectedRows = rows.slice(0, maxRows);
+  const weights = selectedRows.map((row) => subShotWeight(row));
+  const totalWeight = weights.reduce((sum, value) => sum + value, 0) || selectedRows.length || 1;
+  let cursor = 0;
+  return selectedRows.map((row, index) => {
+    const remainingRows = selectedRows.length - index;
+    const remainingDuration = duration - cursor;
+    const rawLength = index === selectedRows.length - 1
+      ? remainingDuration
+      : duration * (weights[index] / totalWeight);
+    const minLength = Math.min(1.2, remainingDuration / remainingRows);
+    const maxLength = remainingDuration - Math.max(0, remainingRows - 1) * 0.8;
+    const length = index === selectedRows.length - 1 ? remainingDuration : clampNumber(rawLength, minLength, Math.max(minLength, maxLength));
+    const start = cursor;
+    const end = index === selectedRows.length - 1 ? duration : Math.min(duration, Math.round((cursor + length) * 10) / 10);
+    cursor = end;
+    return `${formatSeconds(start)}-${formatSeconds(end)}`;
+  });
+}
+
+function subShotWeight(row = {}) {
+  const text = [row.action, row.blocking, row.composition, row.cameraLanguage].filter(Boolean).join("");
+  const lengthScore = Math.min(3, Math.max(1, Math.ceil(String(text || "").replace(/\s+/g, "").length / 45)));
+  const keyTerms = ["发现", "出现", "爆发", "追", "逃", "攻击", "转折", "决定", "拿起", "打开", "崩", "唤醒", "reveal", "attack", "escape"];
+  return lengthScore + Math.min(2, keyTerms.filter((term) => String(text).toLowerCase().includes(term.toLowerCase())).length);
+}
+
+function parseTimeRange(value = "") {
+  const match = String(value || "").trim().match(/^(\d+(?:\.\d+)?)\s*[-~—至到]\s*(\d+(?:\.\d+)?)/);
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return { start, end };
+}
+
+function normalizeDialogueRows(rows, validAssetIds, durationSec = 15) {
   return (Array.isArray(rows) ? rows : []).map((row, index) => ({
-    timeRange: stringOr(row.timeRange, row.time_range || defaultSubShotRange(index)),
+    timeRange: normalizeTimeRange(row.timeRange || row.time_range, index, durationSec),
     speakerAssetId: validAssetIds.has(row.speakerAssetId) ? row.speakerAssetId : validAssetIds.has(row.speaker_asset_id) ? row.speaker_asset_id : "",
     voice: stringOr(row.voice, ""),
     text: stringOr(row.text, row.dialogue || "")
@@ -4082,8 +4643,46 @@ function filterAssetRefs(refs, validAssetIds) {
   return [...new Set(input.map((ref) => String(ref).trim()).filter((ref) => validAssetIds.has(ref)))];
 }
 
-function defaultSubShotRange(index) {
-  return ["0.0-3.0", "3.0-7.0", "7.0-10.0", "10.0-15.0"][index] || `${index * 3}.0-${(index + 1) * 3}.0`;
+function normalizeTimeRange(value, index = 0, durationSec = 15) {
+  const duration = normalizeClipDuration(durationSec);
+  const text = String(value || "").trim();
+  const match = text.match(/^(\d+(?:\.\d+)?)\s*[-~—至到]\s*(\d+(?:\.\d+)?)/);
+  if (match) {
+    const start = Math.max(0, Math.min(duration, Number(match[1]) || 0));
+    const end = Math.max(start + 0.1, Math.min(duration, Number(match[2]) || duration));
+    if (end <= duration && start < end) {
+      return `${formatSeconds(start)}-${formatSeconds(end)}`;
+    }
+  }
+  return defaultSubShotRange(index, duration);
+}
+
+function defaultSubShotRange(index, durationSec = 15) {
+  const ranges = defaultSubShotRanges(durationSec);
+  return ranges[index] || ranges[ranges.length - 1] || `0.0-${formatSeconds(normalizeClipDuration(durationSec))}`;
+}
+
+function defaultSubShotRanges(durationSec = 15) {
+  const duration = normalizeClipDuration(durationSec);
+  const parts = duration <= 6 ? 2 : duration <= 8 ? 3 : duration <= 12 ? 4 : 5;
+  const ranges = [];
+  for (let index = 0; index < parts; index += 1) {
+    const start = index === 0 ? 0 : Math.round((duration * index / parts) * 10) / 10;
+    const end = index === parts - 1 ? duration : Math.round((duration * (index + 1) / parts) * 10) / 10;
+    ranges.push(`${formatSeconds(start)}-${formatSeconds(end)}`);
+  }
+  return ranges;
+}
+
+function normalizeClipDuration(value, fallback = 15) {
+  const raw = Number(value);
+  const base = Number.isFinite(raw) && raw > 0 ? raw : Number(fallback) || 15;
+  return Math.max(5, Math.min(15, Math.round(base)));
+}
+
+function formatSeconds(value) {
+  const number = Number(value) || 0;
+  return Number.isInteger(number) ? `${number}.0` : number.toFixed(1);
 }
 
 function countCards(cards = {}) {
@@ -4180,7 +4779,12 @@ function buildSeedancePromptFromParts(shot, assetRefs, assets, assetImages) {
     return `${id}${asset?.name ? ` ${asset.name}` : ""}${image?.url ? ` image:${image.url}` : ""}`;
   }).join("; ");
   return [
-    `15s video shot ${shot.id || ""}.`,
+    `${normalizeClipDuration(shot.durationSec || 15)}s video shot ${shot.id || ""}.`,
+    `Editing relation: ${shot.cutRelation || "continuous_action"}; ellipsis: ${shot.ellipsis || "none"}; pace: ${shot.pace || "normal_action"}.`,
+    `Entry beat: ${shot.entryBeat || ""}`,
+    `Main beat: ${shot.mainBeat || shot.action || ""}`,
+    `Exit beat: ${shot.exitBeat || ""}`,
+    `Camera motivation: ${shot.cameraMotivation || ""}`,
     `Action: ${shot.action || ""}`,
     `Camera: ${shot.camera || ""}`,
     `Visual notes: ${shot.visualNotes || shot.assetNotes || ""}`,
@@ -5116,7 +5720,7 @@ async function syncActiveProject({ config, state } = {}) {
     project.scriptText = project.config.project.logline || project.scriptText || "";
   }
   if (state) {
-    project.state = normalizeState(state);
+    project.state = structuredClone(state);
   }
   project.coverUrl = inferProjectCover(project.state);
   project.updatedAt = new Date().toISOString();
@@ -5447,7 +6051,7 @@ function normalizeVideoProfiles(current = {}, next = {}) {
         maxReferenceImages: profile.id === DEFAULT_VIDEO_PROFILE_ID
           ? Math.max(MAX_SHOT_ASSET_REFS, Number(profile.maxReferenceImages || 0))
           : Number(profile.maxReferenceImages || MAX_SHOT_ASSET_REFS),
-        description: id === DEFAULT_VIDEO_PROFILE_ID ? `15s 分镜提示词 + 最多 ${MAX_SHOT_ASSET_REFS} 张资产参考图。` : stringOr(profile.description, "")
+        description: id === DEFAULT_VIDEO_PROFILE_ID ? `5-15s 分镜提示词 + 最多 ${MAX_SHOT_ASSET_REFS} 张资产参考图。` : stringOr(profile.description, "")
       });
     }
   };
@@ -5717,6 +6321,12 @@ function normalizeEpisode(raw = {}, fallbackOrder = 1, fallbackScript = null) {
   const script = hasOwnScript ? raw.script : fallbackScript || null;
   const brief = stringOr(raw.brief, raw.synopsis || script?.synopsis || "");
   const scriptStatus = raw.scriptStatus || raw.script_status || inferEpisodeScriptStatus({ ...raw, brief, script });
+  const shots = Array.isArray(raw.shots) ? raw.shots.map((shot) => ({
+    ...shot,
+    durationSec: normalizeClipDuration(shot.durationSec || shot.duration || 15),
+    assetRefs: Array.isArray(shot.assetRefs) ? shot.assetRefs : Array.isArray(shot.asset_refs) ? shot.asset_refs : []
+  })) : [];
+  const normalizedShots = normalizeShotContinuitySequence(shots);
   return {
     id: stringOr(raw.id, `EP${String(order).padStart(2, "0")}`),
     title: stringOr(raw.title, `第 ${order} 集`),
@@ -5732,11 +6342,7 @@ function normalizeEpisode(raw = {}, fallbackOrder = 1, fallbackScript = null) {
     scriptSourceMode: stringOr(raw.scriptSourceMode || raw.script_source_mode, script ? "manual" : ""),
     scriptStructuredAt: stringOr(raw.scriptStructuredAt || raw.script_structured_at, script ? raw.updatedAt || raw.createdAt || now : ""),
     scriptAdapterError: stringOr(raw.scriptAdapterError || raw.script_adapter_error, ""),
-    shots: Array.isArray(raw.shots) ? raw.shots.map((shot) => ({
-      ...shot,
-      durationSec: 15,
-      assetRefs: Array.isArray(shot.assetRefs) ? shot.assetRefs : Array.isArray(shot.asset_refs) ? shot.asset_refs : []
-    })) : [],
+    shots: normalizedShots,
     promptPackages: Array.isArray(raw.promptPackages) ? raw.promptPackages : [],
     images: Array.isArray(raw.images) ? raw.images : [],
     videos: Array.isArray(raw.videos) ? raw.videos : [],
@@ -5874,7 +6480,6 @@ async function markJobRunning(type, scopeId = "global", label = "") {
     const job = upsertJob(state, { type, scopeId, label, status: "running" });
     touchState(state);
     await writeState(state);
-    await syncActiveProject({ state });
     return { state, job, duplicate: false };
   });
 }
@@ -5885,7 +6490,6 @@ async function markJobFinished(type, scopeId = "global", status = "succeeded", p
     const job = finishJob(state, type, scopeId, status, patch);
     touchState(state);
     await writeState(state);
-    await syncActiveProject({ state });
     return { state, job };
   });
 }
