@@ -1264,10 +1264,13 @@ function setPromptSubshotTab(subshotId) {
 }
 
 function createPromptEditorState(pack = {}, shot = {}) {
+  const shotAssetCatalog = uniqueAssetIds(shot.assetRefs || [])
+    .map(findClientAsset)
+    .filter(Boolean);
   const referenceAssets = uniqueAssets([
     ...(pack.assetReferences || []),
-    ...clientAssetCatalog().filter((asset) => (pack.assetRefs || []).includes(asset.id))
-  ]);
+    ...shotAssetCatalog
+  ]).filter((asset) => !shotAssetCatalog.length || shotAssetCatalog.some((shotAsset) => shotAsset.id === asset.id));
   return {
     packageId: pack.id,
     episodeId: getActiveEpisode()?.id || "",
@@ -1276,7 +1279,8 @@ function createPromptEditorState(pack = {}, shot = {}) {
     attachedFields: [],
     manualEdited: Boolean(pack.manualEditedAt),
     showRequestPreview: false,
-    assetCatalog: clientAssetCatalog(),
+    assetCatalog: shotAssetCatalog.length ? shotAssetCatalog : clientAssetCatalog(),
+    allowedRefs: new Set(shotAssetCatalog.map((asset) => asset.id)),
     selectedRefs: new Set(referenceAssets.map((asset) => asset.id))
   };
 }
@@ -2083,8 +2087,6 @@ async function saveShotReferenceAssets(shotId = "", assetRefs = [], options = {}
 
 function currentShotAssetRefs(shotId = "") {
   const episode = getActiveEpisode();
-  const pack = (episode?.promptPackages || []).find((item) => item.shotId === shotId);
-  if (pack?.assetRefs?.length) return uniqueAssetIds(pack.assetRefs);
   const shot = (episode?.shots || []).find((item) => item.id === shotId);
   return uniqueAssetIds(shot?.assetRefs || []);
 }
@@ -3365,7 +3367,7 @@ function renderShots(shots, packages) {
   els.shotsOutput.innerHTML = shots.map((shot) => {
     const pack = packageByShot.get(shot.id);
     const video = videosByShot.get(shot.id) || {};
-    const assets = pack ? promptPackageReferenceAssets(pack) : inferShotAssets(shot, assetCatalog);
+    const assets = inferShotAssets(shot, assetCatalog);
     const activeAssetTab = normalizeShotAssetTab(current.shotAssetTabs?.[shot.id] || "all");
     const visibleAssets = filterShotAssets(assets, activeAssetTab);
     const promptKey = promptJobKey(shot.id);
@@ -3547,13 +3549,13 @@ function renderShotAssetStrip(assets = [], shotId = "") {
   return `
     <div class="shot-asset-strip">
       ${assets.map((asset) => `
-        <article class="shot-asset-chip">
+        <article class="shot-asset-chip ${asset.imageUrl ? "" : "has-no-image"}">
           <button class="shot-asset-main" type="button" data-shot-asset="${escapeAttr(asset.id)}" title="编辑${escapeAttr(asset.name || asset.id)}">
             <span class="shot-asset-thumb">
               ${asset.imageUrl ? `<img src="${escapeAttr(asset.imageUrl)}" alt="${escapeAttr(asset.name || asset.id)}">` : `<span>${escapeHtml((asset.name || asset.id || "?").slice(0, 2))}</span>`}
             </span>
             <strong>${escapeHtml(asset.name || asset.id)}</strong>
-            <small>${escapeHtml(asset.type || "asset")}</small>
+            <small>${escapeHtml(asset.type || "asset")}${asset.imageUrl ? "" : " · 无图"}</small>
           </button>
           <button class="shot-asset-remove" type="button" aria-label="从本分镜移除此参考资产" title="仅从本分镜移除此参考，不删除资产库" data-shot-id="${escapeAttr(shotId)}" data-remove-shot-asset="${escapeAttr(asset.id)}">×</button>
         </article>
@@ -3587,6 +3589,7 @@ function normalizeShotAssetTab(type) {
 
 function renderPromptSummary(pack, shot, assets = []) {
   const refs = promptPackageReferenceAssets(pack);
+  const sync = promptPackageAssetSyncState(pack, assets);
   const stale = promptPackageIsStale(pack);
   const summary = [
     pack.soundDesign ? `音效：${pack.soundDesign}` : "",
@@ -3604,8 +3607,38 @@ function renderPromptSummary(pack, shot, assets = []) {
       ${stale ? `<small class="prompt-summary-warning">当前提示词早于最新分镜脚本，建议重新生成。</small>` : ""}
       <p>${escapeHtml(clipText(summary, 190))}</p>
       ${renderAssetMentions(refs)}
+      ${renderPromptAssetSyncWarning(sync)}
     </div>
   `;
+}
+
+function promptPackageAssetSyncState(pack = {}, shotAssets = []) {
+  const shotIds = uniqueAssetIds(shotAssets.map((asset) => asset.id));
+  const packIds = uniqueAssetIds(promptPackageReferenceAssets(pack).map((asset) => asset.id));
+  return {
+    missing: shotIds.filter((id) => !packIds.includes(id)).map(findClientAsset).filter(Boolean),
+    extra: packIds.filter((id) => !shotIds.includes(id)).map(findClientAsset).filter(Boolean),
+    noImage: shotAssets.filter((asset) => !asset.imageUrl)
+  };
+}
+
+function renderPromptAssetSyncWarning(sync = {}) {
+  const rows = [];
+  if (sync.missing?.length) {
+    rows.push(`提示词包缺少分镜资产：${sync.missing.map(assetBriefLabel).join("、")}`);
+  }
+  if (sync.extra?.length) {
+    rows.push(`提示词包包含额外资产：${sync.extra.map(assetBriefLabel).join("、")}`);
+  }
+  if (sync.noImage?.length) {
+    rows.push(`无参考图，仅可文本引用：${sync.noImage.map(assetBriefLabel).join("、")}`);
+  }
+  if (!rows.length) return "";
+  return `<div class="prompt-sync-warning">${rows.map((row) => `<small>${escapeHtml(row)}</small>`).join("")}</div>`;
+}
+
+function assetBriefLabel(asset = {}) {
+  return `${asset.id || ""} ${asset.name || ""}`.trim();
 }
 
 function renderPromptError(job = {}) {
@@ -4860,24 +4893,30 @@ function detachPromptMentionEditors() {
 
 function renderPromptEditRow({ key, label, value, refs = [], multiline = false }) {
   const uniqueRefs = uniqueAssetIds(refs).filter((id) => findClientAsset(id));
-  const editorValue = promptEditorInitialValue(value || "", uniqueRefs);
+  const allowedRefs = promptEditorAllowedRefs();
+  const editorValue = promptEditorInitialValue(value || "", uniqueRefs, allowedRefs);
   return `
     <div class="prompt-edit-row">
       <label>
         <span>${escapeHtml(label)}</span>
-        <textarea class="prompt-mention-editor ${multiline ? "is-multiline" : ""}" data-prompt-field="${escapeAttr(key)}" data-prompt-editor="true" data-allowed-refs="${escapeAttr(uniqueRefs.join(","))}" rows="${multiline ? 3 : 1}" placeholder="输入 @ 可从项目资产库插入参考对象">${escapeHtml(encodePromptTagifyText(editorValue, uniqueRefs))}</textarea>
+        <textarea class="prompt-mention-editor ${multiline ? "is-multiline" : ""}" data-prompt-field="${escapeAttr(key)}" data-prompt-editor="true" data-allowed-refs="${escapeAttr(allowedRefs.join(","))}" rows="${multiline ? 3 : 1}" placeholder="输入 @ 可从本分镜资产中插入参考对象">${escapeHtml(encodePromptTagifyText(editorValue, allowedRefs))}</textarea>
       </label>
     </div>
   `;
 }
 
-function promptEditorInitialValue(text = "", refs = []) {
-  const allowedAssets = uniqueAssetIds(refs).map(findClientAsset).filter(Boolean);
+function promptEditorAllowedRefs() {
+  return uniqueAssetIds([...(promptEditor?.allowedRefs || [])]).filter((id) => findClientAsset(id));
+}
+
+function promptEditorInitialValue(text = "", refs = [], allowedRefs = refs) {
+  const allowedAssets = uniqueAssetIds(allowedRefs).map(findClientAsset).filter(Boolean);
   const source = decodePromptMentionText(decodePromptTagifyText(text || ""), allowedAssets);
   if (!source.trim()) return "";
   const visibleMentions = parsePromptMentions(source, allowedAssets);
   if (visibleMentions.length) return source;
-  const usableRefs = uniqueAssetIds(refs).filter((id) => findClientAsset(id));
+  const allowedSet = new Set(uniqueAssetIds(allowedRefs));
+  const usableRefs = uniqueAssetIds(refs).filter((id) => allowedSet.has(id) && findClientAsset(id));
   if (promptEditor?.manualEdited && !usableRefs.length) return source;
   return insertPromptRefsIntoExistingText(source, usableRefs);
 }

@@ -858,8 +858,7 @@ async function saveShotAssetRefs(payload = {}) {
     }
     const assets = flattenCards(state.cards);
     const validAssetIds = new Set(assets.map((asset) => asset.id));
-    const existingPack = (episode.promptPackages || []).find((pack) => pack.shotId === shotId);
-    const currentRefs = filterAssetRefs(existingPack?.assetRefs?.length ? existingPack.assetRefs : shot.assetRefs || [], validAssetIds);
+    const currentRefs = filterAssetRefs(shot.assetRefs || [], validAssetIds);
     const nextRefs = filterAssetRefs(payload.assetRefs || payload.asset_refs || [], validAssetIds).slice(0, MAX_SHOT_ASSET_REFS);
     if (!nextRefs.length && payload.requireNonEmpty) {
       throw new Error("Asset refs cannot be empty");
@@ -910,9 +909,10 @@ function mergePromptPackageAssetRefs(pack = {}, nextRefs = [], removedRefs = [],
   let changed = false;
   const nextRefSet = new Set(nextRefs);
   const removedSet = new Set(removedRefs);
-  const shouldRegeneratePrompt = addedRefs.length > 0;
+  const shouldRegeneratePrompt = addedRefs.length > 0 || removedRefs.length > 0;
   const wasStale = isPromptPackageStale(pack);
   const nextStale = shouldRegeneratePrompt || wasStale;
+  if (shouldRegeneratePrompt) changed = true;
   const removeDeletedRefs = (refs = []) => {
     const input = Array.isArray(refs) ? refs : [];
     const output = input.filter((id) => !removedSet.has(id));
@@ -920,11 +920,12 @@ function mergePromptPackageAssetRefs(pack = {}, nextRefs = [], removedRefs = [],
     return output;
   };
   const oldPackRefs = Array.isArray(pack.assetRefs) ? pack.assetRefs : [];
-  if (oldPackRefs.join("|") !== nextRefs.join("|")) changed = true;
+  const nextPackRefs = removeDeletedRefs(oldPackRefs).filter((id) => nextRefSet.has(id));
+  if (oldPackRefs.join("|") !== nextPackRefs.join("|")) changed = true;
   const nextPack = {
     ...pack,
-    assetRefs: nextRefs,
-    assetReferences: assetReferencesForRefs(nextRefs, flattenCards(cards), assetImages),
+    assetRefs: nextPackRefs,
+    assetReferences: assetReferencesForRefs(nextPackRefs, flattenCards(cards), assetImages),
     audio: (pack.audio || []).map((row) => ({
       ...row,
       assetRefs: removeDeletedRefs(row.assetRefs)
@@ -941,7 +942,7 @@ function mergePromptPackageAssetRefs(pack = {}, nextRefs = [], removedRefs = [],
       assetRefs: removeDeletedRefs(subShot.assetRefs).filter((id) => nextRefSet.has(id))
     })),
     stale: nextStale,
-    staleReason: shouldRegeneratePrompt ? "shot-asset-ref-added" : pack.staleReason || "",
+    staleReason: shouldRegeneratePrompt ? "shot-asset-refs-updated" : pack.staleReason || "",
     staleAt: shouldRegeneratePrompt ? updatedAt : pack.staleAt || "",
     assetRefsEditedAt: updatedAt,
     updatedAt
@@ -1014,7 +1015,9 @@ async function savePromptPackageEdits(payload = {}) {
     const validAssetIds = new Set(assets.map((asset) => asset.id));
     const currentPack = episode.promptPackages[index];
     const updatedAt = new Date().toISOString();
-    const edited = mergePromptPackageEdits(currentPack, payload.package || payload, validAssetIds, updatedAt);
+    const shot = (episode.shots || []).find((item) => item.id === currentPack.shotId);
+    const allowedAssetIds = promptPackageAllowedAssetIds(shot || {}, validAssetIds);
+    const edited = mergePromptPackageEdits(currentPack, payload.package || payload, allowedAssetIds, updatedAt);
     episode.promptPackages[index] = hydratePromptPackageReferences([edited], state.cards, state.assetImages || [])[0];
     episode.videos = (episode.videos || []).map((video) => video.shotId === currentPack.shotId
       ? {
@@ -1362,14 +1365,18 @@ async function doGenerateVideos(payload = {}) {
   if (!packages.length) {
     throw new Error("没有可提交的视频提示词包");
   }
-  const stalePackages = packages.filter(isPromptPackageStale);
+  const shotsById = new Map((episode.shots || []).map((shot) => [shot.id, shot]));
+  const assets = flattenCards(state.cards);
+  const validAssetIds = new Set(assets.map((asset) => asset.id));
+  const stalePackages = packages.filter((pack) => {
+    const shot = shotsById.get(pack.shotId) || {};
+    return isPromptPackageStale(pack) || promptPackageOutOfSyncWithShot(pack, shot, validAssetIds);
+  });
   if (stalePackages.length) {
-    throw new Error(`分镜脚本已更新，请先重新生成提示词包：${stalePackages.map((pack) => pack.shotId || pack.id).join(", ")}`);
+    throw new Error(`分镜资产或提示词包已更新，请先重新生成或保存提示词包：${stalePackages.map((pack) => pack.shotId || pack.id).join(", ")}`);
   }
 
   const adapter = resolveModelAdapter(config, "videoModel");
-  const shotsById = new Map((episode.shots || []).map((shot) => [shot.id, shot]));
-  const assets = flattenCards(state.cards);
   const hydratedPackages = hydratePromptPackageReferences(packages, state.cards, state.assetImages || []);
   const outputs = await runConcurrent(hydratedPackages, 1, async (pack) => {
     const shot = shotsById.get(pack.shotId) || {};
@@ -2814,6 +2821,9 @@ function buildCardsPrompt(config, script, shots, existingCards = {}, assetImages
       "Do not bake the global video style, render engine, camera style, lighting style, resolution, aspect ratio, subtitles, or temporary scene mood into asset prompts.",
       "Use project.visualStyle only as context for consistency, not as text to copy into each asset prompt.",
       "selectedAssetRefs must use existing asset ids or ids from the new assets you output.",
+      "For location assets, the most specific current shot location has higher priority than a broader parent area or world asset.",
+      "Use a broad/global location asset only for establishing shots, geography, wide-area travel, or when no specific current location exists.",
+      "Do not replace a specific current location with a broader asset just because the broader asset already has a reference image.",
       "Return JSON only. Do not return Markdown."
     ],
     priorityRules: [
@@ -2865,6 +2875,8 @@ function buildPromptPackagesPrompt(config, shots, cards, assetImages, episode = 
       "Respect shot.cutRelation, shot.cameraMotivation, shot.pace, and shot.ellipsis when designing camera language and timing.",
       "Do not skip recovery/orientation in entryBeat after falling, impact, teleport, explosion, or knockback.",
       "Use only asset ids from availableAssets. Do not invent new asset ids.",
+      "availableAssets is a lookup catalog only. For each package, only use asset ids listed in that shot's assetRefs and shotAssetCatalog entry.",
+      "If a useful project asset is not in the shot assetRefs, do not add it in the prompt package. The user must re-extract or add shot assets first.",
       "When availableAssets contains imageUrl, write the seedancePrompt so the video adapter can pair each asset id with its reference image.",
       "SubShot count should follow duration: 5-7s uses 2-3 subShots; 8-12s uses 3-4 subShots; 13-15s uses 4-5 subShots.",
       "Time ranges must cover the full duration without exceeding durationSec.",
@@ -2907,6 +2919,7 @@ function buildPromptPackagesPrompt(config, shots, cards, assetImages, episode = 
       order: episode.order || 1
     },
     shots: shots.map(compactShotForPromptPackage),
+    shotAssetCatalog: shotAssetCatalogForPromptPackages(shots, cards, assetImages),
     availableAssets: availableAssetCatalog(cards, assetImages)
   });
 }
@@ -4282,20 +4295,52 @@ function attachAssetRefsToSelectedShots(state = {}, payload = {}, generatedCards
   const generatedRefs = assetRefsFromGeneratedCards(generatedCards, state.cards);
   const imageByAssetId = new Map((state.assetImages || []).map((image) => [image.assetId, image.url]));
   const previousAssetIds = new Set(flattenCards(previousCards).map((asset) => asset.id));
+  const updatedAt = new Date().toISOString();
   let count = 0;
   for (const episode of state.episodes || []) {
     if (episodeId && episode.id !== episodeId) continue;
+    const changedShotIds = [];
     for (const shot of episode.shots || []) {
       if (requestedIds.size && !requestedIds.has(shot.id)) continue;
-      shot.assetRefs = rankShotAssetRefs(shot, state.cards, {
+      const currentRefs = filterUniqueStrings(shot.assetRefs || []);
+      const nextRefs = rankShotAssetRefs(shot, state.cards, {
         preferredRefs: selectedByShot.get(shot.id) || generatedRefs,
         previousAssetIds,
         imageByAssetId
       });
+      if (currentRefs.join("|") !== nextRefs.join("|")) {
+        shot.assetRefs = nextRefs;
+        shot.updatedAt = updatedAt;
+        changedShotIds.push(shot.id);
+      }
       count += 1;
+    }
+    if (changedShotIds.length) {
+      markEpisodeOutputsStaleForShots(episode, changedShotIds, "shot-asset-extraction-updated", updatedAt);
     }
   }
   return count;
+}
+
+function markEpisodeOutputsStaleForShots(episode = {}, shotIds = [], reason = "shot-updated", updatedAt = new Date().toISOString()) {
+  const changedIds = new Set(shotIds.filter(Boolean));
+  if (!changedIds.size) return;
+  episode.promptPackages = (episode.promptPackages || []).map((pack) => changedIds.has(pack.shotId)
+    ? {
+      ...pack,
+      stale: true,
+      staleReason: reason,
+      staleAt: updatedAt
+    }
+    : pack);
+  episode.videos = (episode.videos || []).map((video) => changedIds.has(video.shotId)
+    ? {
+      ...video,
+      stale: true,
+      staleReason: reason,
+      staleAt: updatedAt
+    }
+    : video);
 }
 
 function selectedAssetRefsByShot(generatedCards = {}, mergedCards = {}) {
@@ -4344,6 +4389,7 @@ function rankShotAssetRefs(shot = {}, cards = {}, options = {}) {
     const score = scoreAssetForShot(asset, text, options);
     if (score > 0) addAssetScore(scores, asset.id, score, "local match");
   }
+  adjustLocationSpecificityScores(scores, byId);
   return [...scores.values()]
     .filter((item) => byId.has(item.id))
     .sort((a, b) => b.score - a.score || assetTypeRank(byId.get(a.id)?.type) - assetTypeRank(byId.get(b.id)?.type))
@@ -4357,6 +4403,40 @@ function addAssetScore(scores, ref, score) {
   const existing = scores.get(id) || { id, score: 0 };
   existing.score = Math.max(existing.score, Number(score) || 0);
   scores.set(id, existing);
+}
+
+function adjustLocationSpecificityScores(scores = new Map(), byId = new Map()) {
+  const locationScores = [...scores.values()].filter((item) => byId.get(item.id)?.type === "location");
+  const hasSpecificLocation = locationScores.some((item) => item.score >= 45 && !broadLocationAsset(byId.get(item.id)));
+  if (!hasSpecificLocation) return;
+  for (const item of locationScores) {
+    if (broadLocationAsset(byId.get(item.id))) {
+      item.score -= 18;
+    }
+  }
+}
+
+function broadLocationAsset(asset = {}) {
+  const text = normalizeAssetName([asset.name, asset.description, asset.prompt].filter(Boolean).join(" "));
+  const broadTerms = [
+    "world",
+    "region",
+    "realm",
+    "kingdom",
+    "continent",
+    "city",
+    "town",
+    "\u5927\u4e16\u754c",
+    "\u4e16\u754c",
+    "\u5927\u9646",
+    "\u56fd\u5ea6",
+    "\u738b\u56fd",
+    "\u8fb9\u5883",
+    "\u533a\u57df",
+    "\u57ce\u5e02",
+    "\u57ce\u9547"
+  ];
+  return broadTerms.some((term) => text.includes(normalizeAssetName(term)));
 }
 
 function scoreAssetForShot(asset, text, options = {}) {
@@ -4424,9 +4504,20 @@ function normalizePromptPackages(data, shots, cards, assetImages, source, adapte
     const matchedShot = shots.find((candidate) => candidate.id === item.shotId);
     const shot = matchedShot || shots[index] || {};
     if (!shot.id) return null;
+    const allowedAssetIds = promptPackageAllowedAssetIds(shot, validAssetIds);
+    const shotAssetRefs = filterAssetRefs(shot.assetRefs || [], validAssetIds);
     const subShots = Array.isArray(item.subShots) ? item.subShots : Array.isArray(item.sub_shots) ? item.sub_shots : [];
     const durationSec = normalizeClipDuration(shot.durationSec || item.durationSec || item.duration || 15);
-    const normalizedSubShots = normalizeSubShotsForDuration(subShots, shot, validAssetIds, durationSec);
+    const normalizedSubShots = normalizeSubShotsForDuration(subShots, shot, allowedAssetIds, durationSec);
+    const audio = normalizeTimedRows(item.audio, allowedAssetIds, durationSec);
+    const dialogue = normalizeDialogueRows(item.dialogue, allowedAssetIds, durationSec);
+    const modelAssetRefs = filterAssetRefs(item.assetRefs || item.asset_refs || [], allowedAssetIds);
+    const derivedAssetRefs = filterAssetRefs([
+      ...modelAssetRefs,
+      ...normalizedSubShots.flatMap((subShot) => subShot.assetRefs || []),
+      ...audio.flatMap((row) => row.assetRefs || []),
+      ...dialogue.map((row) => row.speakerAssetId).filter(Boolean)
+    ], allowedAssetIds);
     const normalized = {
       id: `PKG-${shot.id}`,
       shotId: shot.id,
@@ -4439,11 +4530,11 @@ function normalizePromptPackages(data, shots, cards, assetImages, source, adapte
       durationSec,
       title: stringOr(item.title, `${shot.id || ""} prompt package`),
       soundDesign: stringOr(item.soundDesign, item.sound_design || ""),
-      audio: normalizeTimedRows(item.audio, validAssetIds, durationSec),
-      dialogue: normalizeDialogueRows(item.dialogue, validAssetIds, durationSec),
+      audio,
+      dialogue,
       subShots: normalizedSubShots,
       seedancePrompt: stringOr(item.seedancePrompt, item.seedance_prompt || ""),
-      assetRefs: filterAssetRefs(item.assetRefs || item.asset_refs || [], validAssetIds),
+      assetRefs: shotAssetRefs.length ? shotAssetRefs.slice(0, MAX_SHOT_ASSET_REFS) : derivedAssetRefs,
       source,
       adapterError: adapterError || "",
       createdAt: new Date().toISOString()
@@ -4457,6 +4548,36 @@ function normalizePromptPackages(data, shots, cards, assetImages, source, adapte
     }
     return normalized;
   }).filter(Boolean);
+}
+
+function promptPackageAllowedAssetIds(shot = {}, validAssetIds = new Set()) {
+  const shotRefs = filterAssetRefs(shot.assetRefs || [], validAssetIds);
+  return shotRefs.length ? new Set(shotRefs) : validAssetIds;
+}
+
+function promptPackageOutOfSyncWithShot(pack = {}, shot = {}, validAssetIds = new Set()) {
+  const shotRefs = filterAssetRefs(shot.assetRefs || [], validAssetIds);
+  if (!shotRefs.length) return false;
+  const packRefs = filterAssetRefs(savedPromptAssetRefs(pack), validAssetIds);
+  return !sameStringSet(shotRefs, packRefs);
+}
+
+function sameStringSet(a = [], b = []) {
+  const left = filterUniqueStrings(a);
+  const right = filterUniqueStrings(b);
+  if (left.length !== right.length) return false;
+  const rightSet = new Set(right);
+  return left.every((id) => rightSet.has(id));
+}
+
+function shotAssetCatalogForPromptPackages(shots = [], cards = {}, assetImages = []) {
+  const assetById = new Map(availableAssetCatalog(cards, assetImages).map((asset) => [asset.id, asset]));
+  return (shots || []).map((shot) => ({
+    shotId: shot.id || "",
+    assets: filterUniqueStrings(shot.assetRefs || [])
+      .map((id) => assetById.get(id))
+      .filter(Boolean)
+  })).filter((row) => row.shotId);
 }
 
 function normalizeAssetType(value) {
