@@ -1626,6 +1626,11 @@ legend {
   object-fit: cover;
 }
 
+.shot-asset-chip.has-no-image .shot-asset-thumb {
+  border: 1px dashed rgba(122, 74, 214, .38);
+  background: #f7f3ff;
+}
+
 .shot-asset-main strong,
 .shot-asset-main small {
   overflow: hidden;
@@ -1819,6 +1824,22 @@ legend {
   color: #a05a00;
   font-size: 12px;
   font-weight: 800;
+}
+
+.prompt-sync-warning {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid #ead7ff;
+  border-radius: 7px;
+  background: #fffaff;
+}
+
+.prompt-sync-warning small {
+  color: #7d529a;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.35;
 }
 
 .warning-tag {

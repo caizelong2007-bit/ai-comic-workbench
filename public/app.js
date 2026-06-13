@@ -15,8 +15,8 @@ const api = {
 
 const viewMeta = {
   "project-settings": ["Project Settings", "项目设置", "项目剧本、项目属性和项目资产会作为所有剧集的统一基础。"],
-  "episode-script": ["Episode Script", "分集剧本", "为当前剧集单独设置剧情，再进入 15s 分镜制作。"],
-  "shot-making": ["Shot Making", "分镜制作", "把当前剧集剧本拆成多个 15s 视频分镜。"],
+  "episode-script": ["Episode Script", "分集剧本", "为当前剧集单独设置剧情，再进入视频分镜制作。"],
+  "shot-making": ["Shot Making", "分镜制作", "把当前剧集剧本拆成多个 5-15 秒视频分镜。"],
   "shot-editing": ["Shot Editing", "分镜剪辑", "视频片段生成后在这里做片段预览、排序和剪辑。"],
   "final-output": ["Output", "输出单集成片", "视频模型接入后在这里生成片段并合成单集成片。"]
 };
@@ -1184,6 +1184,14 @@ function openShotEditorModal(shotId) {
   form.elements.action.value = shot.action || "";
   form.elements.dialogue.value = shot.dialogue || "";
   form.elements.assetNotes.value = shot.assetNotes || "";
+  form.elements.cutRelation.value = shot.cutRelation || "continuous_action";
+  form.elements.ellipsis.value = shot.ellipsis || "none";
+  form.elements.cameraMotivation.value = shot.cameraMotivation || "follow_action";
+  form.elements.pace.value = shot.pace || "normal_action";
+  form.elements.entryBeat.value = shot.entryBeat || "";
+  form.elements.mainBeat.value = shot.mainBeat || shot.action || "";
+  form.elements.exitBeat.value = shot.exitBeat || "";
+  form.elements.continuityCheck.value = shot.continuityCheck || "";
   form.elements.visualNotes.value = shot.visualNotes || "";
   form.elements.continuity.value = shot.continuity || "";
   els.shotEditorTitle.textContent = `编辑分镜脚本 ${shot.id}`;
@@ -1209,6 +1217,14 @@ async function saveShotEditorEdits(event) {
     action: String(formData.get("action") || "").trim(),
     dialogue: String(formData.get("dialogue") || "").trim(),
     assetNotes: String(formData.get("assetNotes") || "").trim(),
+    cutRelation: String(formData.get("cutRelation") || "continuous_action").trim(),
+    ellipsis: String(formData.get("ellipsis") || "none").trim(),
+    cameraMotivation: String(formData.get("cameraMotivation") || "follow_action").trim(),
+    pace: String(formData.get("pace") || "normal_action").trim(),
+    entryBeat: String(formData.get("entryBeat") || "").trim(),
+    mainBeat: String(formData.get("mainBeat") || "").trim(),
+    exitBeat: String(formData.get("exitBeat") || "").trim(),
+    continuityCheck: String(formData.get("continuityCheck") || "").trim(),
     visualNotes: String(formData.get("visualNotes") || "").trim(),
     continuity: String(formData.get("continuity") || "").trim()
   };
@@ -1248,10 +1264,13 @@ function setPromptSubshotTab(subshotId) {
 }
 
 function createPromptEditorState(pack = {}, shot = {}) {
+  const shotAssetCatalog = uniqueAssetIds(shot.assetRefs || [])
+    .map(findClientAsset)
+    .filter(Boolean);
   const referenceAssets = uniqueAssets([
     ...(pack.assetReferences || []),
-    ...clientAssetCatalog().filter((asset) => (pack.assetRefs || []).includes(asset.id))
-  ]);
+    ...shotAssetCatalog
+  ]).filter((asset) => !shotAssetCatalog.length || shotAssetCatalog.some((shotAsset) => shotAsset.id === asset.id));
   return {
     packageId: pack.id,
     episodeId: getActiveEpisode()?.id || "",
@@ -1260,7 +1279,8 @@ function createPromptEditorState(pack = {}, shot = {}) {
     attachedFields: [],
     manualEdited: Boolean(pack.manualEditedAt),
     showRequestPreview: false,
-    assetCatalog: clientAssetCatalog(),
+    assetCatalog: shotAssetCatalog.length ? shotAssetCatalog : clientAssetCatalog(),
+    allowedRefs: new Set(shotAssetCatalog.map((asset) => asset.id)),
     selectedRefs: new Set(referenceAssets.map((asset) => asset.id))
   };
 }
@@ -2067,8 +2087,6 @@ async function saveShotReferenceAssets(shotId = "", assetRefs = [], options = {}
 
 function currentShotAssetRefs(shotId = "") {
   const episode = getActiveEpisode();
-  const pack = (episode?.promptPackages || []).find((item) => item.shotId === shotId);
-  if (pack?.assetRefs?.length) return uniqueAssetIds(pack.assetRefs);
   const shot = (episode?.shots || []).find((item) => item.id === shotId);
   return uniqueAssetIds(shot?.assetRefs || []);
 }
@@ -2146,7 +2164,7 @@ async function generatePromptPackagesByShot() {
   const episode = getActiveEpisode();
   const shots = episode?.shots || [];
   if (!shots.length) {
-    throw new Error("请先生成 15s 分镜");
+    throw new Error("请先生成视频分镜");
   }
   let done = 0;
   toast(`正在生成分镜提示词 0/${shots.length}`);
@@ -2377,6 +2395,14 @@ function buildPromptPackageExport(packageId) {
       action: shot.action || "",
       dialogue: shot.dialogue || "",
       continuity: shot.continuity || "",
+      cutRelation: shot.cutRelation || "",
+      entryBeat: shot.entryBeat || "",
+      mainBeat: shot.mainBeat || "",
+      exitBeat: shot.exitBeat || "",
+      cameraMotivation: shot.cameraMotivation || "",
+      pace: shot.pace || "",
+      ellipsis: shot.ellipsis || "",
+      continuityCheck: shot.continuityCheck || "",
       visualNotes: shot.visualNotes || "",
       assetNotes: shot.assetNotes || ""
     },
@@ -2780,7 +2806,7 @@ function updateAvailability() {
   }
   setButtonLoading(els.genShotsBtn, "shots", !hasEpisodeScript || relatedJobRunning(stageJobKey("shots")));
   if (els.genShotsBtn) {
-    els.genShotsBtn.title = hasEpisodeScript ? "根据当前本集结构化剧本生成 15s 分镜脚本" : "请先在分集剧本页生成/完善本集结构化剧本";
+    els.genShotsBtn.title = hasEpisodeScript ? "根据当前本集结构化剧本生成 5-15 秒视频分镜脚本" : "请先在分集剧本页生成/完善本集结构化剧本";
   }
   setButtonLoading(els.genVideosBtn, "videos", !hasEpisode || !(getActiveEpisode()?.shots || []).length || relatedJobRunning(stageJobKey("videos")));
   setStandaloneButtonLoading(els.genVideoClipsBtn, "video-clip:video-clips", !hasEpisode || !(getActiveEpisode()?.promptPackages || []).length || relatedJobRunning("video-clip:video-clips"), "生成中...");
@@ -2881,7 +2907,36 @@ function readConfigForm() {
   document.querySelectorAll("[data-model-selection]").forEach((field) => {
     modelSelection[field.dataset.modelSelection] = field.value;
   });
-  return { project, adapters, modelSelection };
+  const modelConfigs = syncAdapterFieldsToSelectedModels(adapters, modelSelection);
+  return { project, adapters, modelConfigs, modelSelection };
+}
+
+function syncAdapterFieldsToSelectedModels(adapters = {}, modelSelection = {}) {
+  const configs = structuredClone(current.config?.modelConfigs || {});
+  for (const [type, selectionKey] of Object.entries({
+    llm: "scriptLlm",
+    image: "assetImageModel",
+    video: "videoModel"
+  })) {
+    const adapter = adapters[type] || {};
+    const list = Array.isArray(configs[type]) ? configs[type] : [];
+    const selectedId = modelSelection[selectionKey] || current.config?.modelSelection?.[selectionKey] || list[0]?.id || "";
+    const index = list.findIndex((model) => model.id === selectedId);
+    if (index < 0) continue;
+    const existing = list[index] || {};
+    list[index] = {
+      ...existing,
+      provider: adapter.provider || existing.provider || "",
+      endpoint: adapter.endpoint || existing.endpoint || "",
+      model: adapter.model || existing.model || "",
+      apiKey: adapter.apiKey || existing.apiKey || "",
+      fallbackToMock: adapter.fallbackToMock === true,
+      timeoutMs: adapter.timeoutMs || existing.timeoutMs || "",
+      ...(type === "video" ? { resolution: adapter.resolution || existing.resolution || "" } : {})
+    };
+    configs[type] = list;
+  }
+  return configs;
 }
 
 function render() {
@@ -3303,7 +3358,7 @@ function renderScript(script, target, emptyText = "还没有剧本。") {
 function renderShots(shots, packages) {
   if (!shots.length) {
     els.shotsOutput.className = "shot-list empty";
-    els.shotsOutput.textContent = "还没有 15s 分镜。";
+    els.shotsOutput.textContent = "还没有视频分镜。";
     return;
   }
   const packageByShot = new Map((packages || []).map((pack) => [pack.shotId, pack]));
@@ -3312,7 +3367,7 @@ function renderShots(shots, packages) {
   els.shotsOutput.innerHTML = shots.map((shot) => {
     const pack = packageByShot.get(shot.id);
     const video = videosByShot.get(shot.id) || {};
-    const assets = pack ? promptPackageReferenceAssets(pack) : inferShotAssets(shot, assetCatalog);
+    const assets = inferShotAssets(shot, assetCatalog);
     const activeAssetTab = normalizeShotAssetTab(current.shotAssetTabs?.[shot.id] || "all");
     const visibleAssets = filterShotAssets(assets, activeAssetTab);
     const promptKey = promptJobKey(shot.id);
@@ -3441,7 +3496,10 @@ function formatShotScript(shot = {}) {
     shot.sceneId ? `场景 ${shot.sceneId}` : "",
     shot.shotType || "",
     shot.camera ? `运镜：${shot.camera}` : "",
+    shot.cutRelation ? `剪辑：${shot.cutRelation}` : "",
+    shot.entryBeat ? `入镜：${shot.entryBeat}` : "",
     shot.action || "",
+    shot.exitBeat ? `出镜：${shot.exitBeat}` : "",
     shot.dialogue ? `台词：${shot.dialogue}` : "",
     shot.continuity ? `衔接：${shot.continuity}` : ""
   ].filter(Boolean).join("｜");
@@ -3457,7 +3515,10 @@ function renderShotScriptPreview(shot = {}) {
     <div class="shot-script-preview">
       <h3>${escapeHtml(heading || shot.id || "分镜")}</h3>
       ${shot.camera ? `<p><b>运镜</b>${escapeHtml(clipText(shot.camera, 92))}</p>` : ""}
+      ${shot.cutRelation ? `<p><b>剪辑</b>${escapeHtml(shot.cutRelation)}${shot.pace ? ` / ${escapeHtml(shot.pace)}` : ""}</p>` : ""}
+      ${shot.entryBeat ? `<p><b>入镜</b>${escapeHtml(clipText(shot.entryBeat, 88))}</p>` : ""}
       ${shot.action ? `<p><b>画面</b>${escapeHtml(clipText(shot.action, 118))}</p>` : ""}
+      ${shot.exitBeat ? `<p><b>出镜</b>${escapeHtml(clipText(shot.exitBeat, 88))}</p>` : ""}
       ${shot.dialogue ? `<p><b>台词</b>${escapeHtml(clipText(shot.dialogue, 72))}</p>` : ""}
       ${shot.continuity ? `<p><b>衔接</b>${escapeHtml(clipText(shot.continuity, 72))}</p>` : ""}
     </div>
@@ -3488,13 +3549,13 @@ function renderShotAssetStrip(assets = [], shotId = "") {
   return `
     <div class="shot-asset-strip">
       ${assets.map((asset) => `
-        <article class="shot-asset-chip">
+        <article class="shot-asset-chip ${asset.imageUrl ? "" : "has-no-image"}">
           <button class="shot-asset-main" type="button" data-shot-asset="${escapeAttr(asset.id)}" title="编辑${escapeAttr(asset.name || asset.id)}">
             <span class="shot-asset-thumb">
               ${asset.imageUrl ? `<img src="${escapeAttr(asset.imageUrl)}" alt="${escapeAttr(asset.name || asset.id)}">` : `<span>${escapeHtml((asset.name || asset.id || "?").slice(0, 2))}</span>`}
             </span>
             <strong>${escapeHtml(asset.name || asset.id)}</strong>
-            <small>${escapeHtml(asset.type || "asset")}</small>
+            <small>${escapeHtml(asset.type || "asset")}${asset.imageUrl ? "" : " · 无图"}</small>
           </button>
           <button class="shot-asset-remove" type="button" aria-label="从本分镜移除此参考资产" title="仅从本分镜移除此参考，不删除资产库" data-shot-id="${escapeAttr(shotId)}" data-remove-shot-asset="${escapeAttr(asset.id)}">×</button>
         </article>
@@ -3528,6 +3589,7 @@ function normalizeShotAssetTab(type) {
 
 function renderPromptSummary(pack, shot, assets = []) {
   const refs = promptPackageReferenceAssets(pack);
+  const sync = promptPackageAssetSyncState(pack, assets);
   const stale = promptPackageIsStale(pack);
   const summary = [
     pack.soundDesign ? `音效：${pack.soundDesign}` : "",
@@ -3545,8 +3607,38 @@ function renderPromptSummary(pack, shot, assets = []) {
       ${stale ? `<small class="prompt-summary-warning">当前提示词早于最新分镜脚本，建议重新生成。</small>` : ""}
       <p>${escapeHtml(clipText(summary, 190))}</p>
       ${renderAssetMentions(refs)}
+      ${renderPromptAssetSyncWarning(sync)}
     </div>
   `;
+}
+
+function promptPackageAssetSyncState(pack = {}, shotAssets = []) {
+  const shotIds = uniqueAssetIds(shotAssets.map((asset) => asset.id));
+  const packIds = uniqueAssetIds(promptPackageReferenceAssets(pack).map((asset) => asset.id));
+  return {
+    missing: shotIds.filter((id) => !packIds.includes(id)).map(findClientAsset).filter(Boolean),
+    extra: packIds.filter((id) => !shotIds.includes(id)).map(findClientAsset).filter(Boolean),
+    noImage: shotAssets.filter((asset) => !asset.imageUrl)
+  };
+}
+
+function renderPromptAssetSyncWarning(sync = {}) {
+  const rows = [];
+  if (sync.missing?.length) {
+    rows.push(`提示词包缺少分镜资产：${sync.missing.map(assetBriefLabel).join("、")}`);
+  }
+  if (sync.extra?.length) {
+    rows.push(`提示词包包含额外资产：${sync.extra.map(assetBriefLabel).join("、")}`);
+  }
+  if (sync.noImage?.length) {
+    rows.push(`无参考图，仅可文本引用：${sync.noImage.map(assetBriefLabel).join("、")}`);
+  }
+  if (!rows.length) return "";
+  return `<div class="prompt-sync-warning">${rows.map((row) => `<small>${escapeHtml(row)}</small>`).join("")}</div>`;
+}
+
+function assetBriefLabel(asset = {}) {
+  return `${asset.id || ""} ${asset.name || ""}`.trim();
 }
 
 function renderPromptError(job = {}) {
@@ -4386,7 +4478,7 @@ function uniqueStyleId(baseId, styles = []) {
 function stageName(stage) {
   return {
     script: "项目剧本",
-    shots: "15s 分镜",
+    shots: "视频分镜",
     cards: "资产卡",
     images: "资产参考图重生成",
     videos: "分镜提示词",
@@ -4801,24 +4893,30 @@ function detachPromptMentionEditors() {
 
 function renderPromptEditRow({ key, label, value, refs = [], multiline = false }) {
   const uniqueRefs = uniqueAssetIds(refs).filter((id) => findClientAsset(id));
-  const editorValue = promptEditorInitialValue(value || "", uniqueRefs);
+  const allowedRefs = promptEditorAllowedRefs();
+  const editorValue = promptEditorInitialValue(value || "", uniqueRefs, allowedRefs);
   return `
     <div class="prompt-edit-row">
       <label>
         <span>${escapeHtml(label)}</span>
-        <textarea class="prompt-mention-editor ${multiline ? "is-multiline" : ""}" data-prompt-field="${escapeAttr(key)}" data-prompt-editor="true" data-allowed-refs="${escapeAttr(uniqueRefs.join(","))}" rows="${multiline ? 3 : 1}" placeholder="输入 @ 可从项目资产库插入参考对象">${escapeHtml(encodePromptTagifyText(editorValue, uniqueRefs))}</textarea>
+        <textarea class="prompt-mention-editor ${multiline ? "is-multiline" : ""}" data-prompt-field="${escapeAttr(key)}" data-prompt-editor="true" data-allowed-refs="${escapeAttr(allowedRefs.join(","))}" rows="${multiline ? 3 : 1}" placeholder="输入 @ 可从本分镜资产中插入参考对象">${escapeHtml(encodePromptTagifyText(editorValue, allowedRefs))}</textarea>
       </label>
     </div>
   `;
 }
 
-function promptEditorInitialValue(text = "", refs = []) {
-  const allowedAssets = uniqueAssetIds(refs).map(findClientAsset).filter(Boolean);
+function promptEditorAllowedRefs() {
+  return uniqueAssetIds([...(promptEditor?.allowedRefs || [])]).filter((id) => findClientAsset(id));
+}
+
+function promptEditorInitialValue(text = "", refs = [], allowedRefs = refs) {
+  const allowedAssets = uniqueAssetIds(allowedRefs).map(findClientAsset).filter(Boolean);
   const source = decodePromptMentionText(decodePromptTagifyText(text || ""), allowedAssets);
   if (!source.trim()) return "";
   const visibleMentions = parsePromptMentions(source, allowedAssets);
   if (visibleMentions.length) return source;
-  const usableRefs = uniqueAssetIds(refs).filter((id) => findClientAsset(id));
+  const allowedSet = new Set(uniqueAssetIds(allowedRefs));
+  const usableRefs = uniqueAssetIds(refs).filter((id) => allowedSet.has(id) && findClientAsset(id));
   if (promptEditor?.manualEdited && !usableRefs.length) return source;
   return insertPromptRefsIntoExistingText(source, usableRefs);
 }
