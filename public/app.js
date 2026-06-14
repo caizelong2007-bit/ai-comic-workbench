@@ -464,6 +464,12 @@ function bindEvents() {
       openShotAssetPickerModal(addShotAssetButton.dataset.addShotAsset);
       return;
     }
+    const suggestShotAssetButton = event.target.closest("[data-suggest-shot-asset]");
+    if (suggestShotAssetButton) {
+      event.stopPropagation();
+      addSuggestedShotReferenceAsset(suggestShotAssetButton.dataset.shotId, suggestShotAssetButton.dataset.suggestShotAsset);
+      return;
+    }
     const removeShotAssetButton = event.target.closest("[data-remove-shot-asset]");
     if (removeShotAssetButton) {
       event.stopPropagation();
@@ -2055,6 +2061,22 @@ async function addShotReferenceAsset(assetId = "") {
   closeShotAssetPickerModal();
 }
 
+async function addSuggestedShotReferenceAsset(shotId = "", assetId = "") {
+  if (!shotId || !assetId) return;
+  const refs = currentShotAssetRefs(shotId);
+  if (refs.includes(assetId)) {
+    toast("该资产已在当前分镜参考列表中");
+    return;
+  }
+  if (refs.length >= maxPromptReferenceAssets) {
+    toast(`当前最多保留 ${maxPromptReferenceAssets} 个参考资产，请先移除不必要的资产`);
+    return;
+  }
+  await saveShotReferenceAssets(shotId, uniqueAssetIds([...refs, assetId]), {
+    message: "已添加到本分镜参考资产；请重新生成或保存提示词包后再生成视频。"
+  });
+}
+
 async function removeShotReferenceAsset(shotId = "", assetId = "") {
   if (!shotId || !assetId) return;
   const asset = findClientAsset(assetId);
@@ -3367,9 +3389,11 @@ function renderShots(shots, packages) {
   els.shotsOutput.innerHTML = shots.map((shot) => {
     const pack = packageByShot.get(shot.id);
     const video = videosByShot.get(shot.id) || {};
-    const assets = inferShotAssets(shot, assetCatalog);
+    const assets = shotReferenceAssets(shot, assetCatalog);
+    const suggestedAssets = inferShotAssetSuggestions(shot, assetCatalog, assets);
     const activeAssetTab = normalizeShotAssetTab(current.shotAssetTabs?.[shot.id] || "all");
     const visibleAssets = filterShotAssets(assets, activeAssetTab);
+    const visibleSuggestedAssets = filterShotAssets(suggestedAssets, activeAssetTab);
     const promptKey = promptJobKey(shot.id);
     const promptJob = jobs.get(promptKey);
     const promptRunning = promptJob?.status === "running";
@@ -3393,7 +3417,8 @@ function renderShots(shots, packages) {
             </div>
             <button class="shot-asset-add" type="button" title="从项目资产库添加本分镜参考" aria-label="添加本分镜参考资产" data-add-shot-asset="${escapeAttr(shot.id)}">＋</button>
           </div>
-          ${renderShotAssetStrip(visibleAssets, shot.id)}
+          ${renderShotAssetStrip(visibleAssets, shot.id, { hasSuggestions: visibleSuggestedAssets.length > 0 })}
+          ${renderShotAssetSuggestions(visibleSuggestedAssets, shot.id)}
           <button class="pipeline-action" type="button" data-generate-package-assets="${escapeAttr(shot.id)}" data-job-key="${escapeAttr(packageAssetsJobKey(shot.id))}" data-idle-text="提取资产" data-loading-text="提取中..." ${assetsRunning ? "disabled" : ""}>${assetsRunning ? "提取中..." : "提取资产"}</button>
         </section>
         <section class="shot-cell shot-prompt-cell">
@@ -3525,20 +3550,32 @@ function renderShotScriptPreview(shot = {}) {
   `;
 }
 
-function inferShotAssets(shot = {}, assets = []) {
+function shotReferenceAssets(shot = {}, assets = []) {
   const refs = Array.isArray(shot.assetRefs) ? shot.assetRefs : [];
-  const byRefs = refs.map((id) => findAssetForMention(id, assets)).filter(Boolean);
+  return refs.map((id) => findAssetForMention(id, assets)).filter(Boolean);
+}
+
+function inferShotAssetSuggestions(shot = {}, assets = [], referenceAssets = []) {
+  const savedIds = new Set(referenceAssets.map((asset) => asset.id));
   const text = `${shot.action || ""} ${shot.dialogue || ""} ${shot.camera || ""} ${shot.assetNotes || ""} ${shot.visualNotes || ""}`.toLowerCase();
-  const byText = assets.filter((asset) => {
+  return assets.filter((asset) => {
+    if (!asset?.id || savedIds.has(asset.id)) return false;
     const name = String(asset.name || "").toLowerCase();
     const id = String(asset.id || "").toLowerCase();
     return (name && text.includes(name)) || (id && text.includes(id));
-  });
-  return uniqueAssets([...byRefs, ...byText]).slice(0, 8);
+  }).slice(0, 8);
 }
 
-function renderShotAssetStrip(assets = [], shotId = "") {
+function renderShotAssetStrip(assets = [], shotId = "", options = {}) {
   if (!assets.length) {
+    if (options.hasSuggestions) {
+      return `
+        <div class="shot-asset-empty">
+          <div class="asset-cube"></div>
+          <p>下方资产只是文本识别建议，点击后才会加入本分镜参考。</p>
+        </div>
+      `;
+    }
     return `
       <div class="shot-asset-empty">
         <div class="asset-cube"></div>
@@ -3560,6 +3597,25 @@ function renderShotAssetStrip(assets = [], shotId = "") {
           <button class="shot-asset-remove" type="button" aria-label="从本分镜移除此参考资产" title="仅从本分镜移除此参考，不删除资产库" data-shot-id="${escapeAttr(shotId)}" data-remove-shot-asset="${escapeAttr(asset.id)}">×</button>
         </article>
       `).join("")}
+    </div>
+  `;
+}
+
+function renderShotAssetSuggestions(assets = [], shotId = "") {
+  if (!assets.length) return "";
+  return `
+    <div class="shot-asset-suggestions">
+      <small>建议添加</small>
+      <div class="shot-asset-suggestion-list">
+        ${assets.map((asset) => `
+          <button class="shot-asset-suggestion" type="button" data-shot-id="${escapeAttr(shotId)}" data-suggest-shot-asset="${escapeAttr(asset.id)}" title="添加到本分镜参考资产">
+            <span class="shot-asset-thumb">
+              ${asset.imageUrl ? `<img src="${escapeAttr(asset.imageUrl)}" alt="${escapeAttr(asset.name || asset.id)}">` : `<span>${escapeHtml((asset.name || asset.id || "?").slice(0, 2))}</span>`}
+            </span>
+            <b>${escapeHtml(asset.name || asset.id)}</b>
+          </button>
+        `).join("")}
+      </div>
     </div>
   `;
 }

@@ -1243,6 +1243,7 @@ async function doGeneratePromptPackages(payload = {}) {
     throw new Error(`未找到要生成提示词的分镜：${[...requestedIds].join(", ")}`);
   }
   const shots = selectedShots.map((shot) => ({ ...shot, durationSec: normalizeClipDuration(shot.durationSec || 15) }));
+  assertPromptPackageShotAssetsReady(shots, state.cards);
   const prompt = buildPromptPackagesPrompt(config, shots, state.cards, state.assetImages || [], episode);
   const result = await callLlmJson(resolveModelAdapter(config, "promptPackageLlm"), prompt, () => mockPromptPackages(config, shots, state.cards, state.assetImages || []));
   const outputs = normalizePromptPackages(result.data, shots, state.cards, state.assetImages || [], result.source, result.error || "", activeVideoProfile(config));
@@ -4243,6 +4244,28 @@ function uniqueAssetId(id, existingMap, type) {
 
 function normalizeAssetName(name) {
   return String(name || "").trim().toLowerCase();
+}
+
+function assertPromptPackageShotAssetsReady(shots = [], cards = {}) {
+  const assets = flattenCards(cards);
+  const missingRows = shots.map((shot) => {
+    const existingRefs = filterUniqueStrings(shot.assetRefs || []);
+    if (existingRefs.length) return null;
+    const text = shotAssetText(shot);
+    const matched = assets.filter((asset) => {
+      if (!asset?.id) return false;
+      const identityMatch = assetIdentityTerms(asset).some((term) => text.includes(term));
+      if (!identityMatch) return false;
+      return !minorOrAtmosphereAsset(asset);
+    }).slice(0, MAX_SHOT_ASSET_REFS);
+    if (!matched.length) return null;
+    return {
+      shotId: shot.id || "",
+      assets: matched.map((asset) => asset.name || asset.id).filter(Boolean)
+    };
+  }).filter(Boolean);
+  if (!missingRows.length) return;
+  throw new Error(`请先确认本分镜参考资产后再生成提示词包：${missingRows.map((row) => `${row.shotId} 建议添加 ${row.assets.join("、")}`).join("；")}`);
 }
 
 function selectedShotsForAssetExtraction(state = {}, payload = {}) {

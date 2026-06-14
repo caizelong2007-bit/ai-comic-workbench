@@ -1556,6 +1556,55 @@ legend {
   padding: 12px;
 }
 
+.shot-asset-suggestions {
+  display: grid;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.shot-asset-suggestions > small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.shot-asset-suggestion-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(58px, 1fr));
+  gap: 8px;
+}
+
+.shot-asset-suggestion {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 6px;
+  border: 1px dashed rgba(122, 74, 214, .32);
+  border-radius: 7px;
+  background: #fbf8ff;
+  color: var(--ink);
+  text-align: center;
+  box-shadow: none;
+}
+
+.shot-asset-suggestion:hover {
+  border-color: rgba(122, 74, 214, .58);
+  background: #f6efff;
+  transform: translateY(-1px);
+}
+
+.shot-asset-suggestion .shot-asset-thumb {
+  opacity: .78;
+}
+
+.shot-asset-suggestion b {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .shot-asset-chip {
   position: relative;
   min-width: 0;
