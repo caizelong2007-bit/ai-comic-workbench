@@ -352,6 +352,16 @@ async function route(req, res) {
     return sendJson(res, 200, await saveManualAsset(body));
   }
 
+  if (pathname === "/api/assets/variants/accept" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await acceptVariantCandidate(body));
+  }
+
+  if (pathname === "/api/assets/variants/apply-to-shot" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await applyVariantAssetToShot(body));
+  }
+
   if (pathname === "/api/assets/delete" && req.method === "POST") {
     const body = await readBody(req);
     return sendJson(res, 200, await deleteAsset(body.assetId || body.id));
@@ -370,6 +380,11 @@ async function route(req, res) {
   if (pathname === "/api/shot-assets/save" && req.method === "POST") {
     const body = await readBody(req);
     return sendJson(res, 200, await saveShotAssetRefs(body));
+  }
+
+  if (pathname === "/api/continuity/save" && req.method === "POST") {
+    const body = await readBody(req);
+    return sendJson(res, 200, await saveShotContinuityState(body));
   }
 
   if (pathname === "/api/reset" && req.method === "POST") {
@@ -395,6 +410,11 @@ async function route(req, res) {
   if (pathname === "/api/generate/cards" && req.method === "POST") {
     const payload = await readBody(req);
     return sendJson(res, 200, await generateCards(payload));
+  }
+
+  if (pathname === "/api/generate/continuity" && req.method === "POST") {
+    const payload = await readBody(req);
+    return sendJson(res, 200, await generateContinuityStates(payload));
   }
 
   if (pathname === "/api/generate/asset-images" && req.method === "POST") {
@@ -557,6 +577,7 @@ async function doGenerateShots(payload = {}) {
     latestEpisode.images = [];
     latestEpisode.videos = [];
     latestEpisode.promptPackages = [];
+    latestEpisode.continuityStates = [];
     touchEpisode(latestEpisode);
     touchState(nextState);
     addEvent(nextState, "shots.generated", `${latestEpisode.title} 已生成 ${latestEpisode.shots.length} 个视频分镜`, result.source, result.error);
@@ -602,7 +623,7 @@ async function doGenerateCards(payload = {}) {
     throw new Error("请先生成项目故事剧本");
   }
   const shots = selectedShotsForAssetExtraction(state, payload);
-  const prompt = buildCardsPrompt(config, storyScript, shots, state.cards, state.assetImages);
+  const prompt = buildCardsPrompt(config, storyScript, shots, state.cards, state.assetImages, state);
   const result = await callLlmJson(resolveModelAdapter(config, "assetExtractLlm"), prompt, () => mockCards(config, storyScript, shots));
   const generatedCards = normalizeCards(result.data, config, result.source);
   const latestState = await withStateWriteLock(async () => {
@@ -623,6 +644,228 @@ async function doGenerateCards(payload = {}) {
     return nextState;
   });
   return { ok: true, state: latestState, source: result.source, adapterError: result.error || "" };
+}
+
+async function generateContinuityStates(payload = {}) {
+  const requestedIds = new Set(Array.isArray(payload.shotIds) ? payload.shotIds : []);
+  const singleShotId = requestedIds.size === 1 ? [...requestedIds][0] : "";
+  const scopeId = continuityJobScope(payload.episodeId, singleShotId);
+  const type = "continuity-state";
+  const existing = await getRunningJobSnapshot(type, scopeId);
+  if (existing) {
+    return { ok: true, state: existing.state, job: existing.job, duplicate: true };
+  }
+  const start = await markJobRunning(type, scopeId, singleShotId ? `${singleShotId} 连续性状态生成中` : "连续性状态批量生成中");
+  if (start.duplicate) {
+    return { ok: true, state: start.state, job: start.job, duplicate: true };
+  }
+  try {
+    const response = await doGenerateContinuityStates(payload);
+    await markJobFinished(type, scopeId, "succeeded", {
+      label: singleShotId ? `${singleShotId} 连续性状态已完成` : "连续性状态批量完成",
+      result: { source: response.source || "" }
+    });
+    return { ...response, state: await readState() };
+  } catch (error) {
+    await markJobFinished(type, scopeId, "failed", {
+      label: singleShotId ? `${singleShotId} 连续性状态生成失败` : "连续性状态批量失败",
+      error: publicError(error)
+    });
+    throw error;
+  }
+}
+
+function continuityJobScope(episodeId = "", shotId = "") {
+  const shotScope = String(shotId || "").trim();
+  const episodeScope = String(episodeId || "").trim();
+  if (!shotScope) return episodeScope ? `${episodeScope}:continuity-states` : "continuity-states";
+  return episodeScope ? `${episodeScope}:${shotScope}` : shotScope;
+}
+
+async function doGenerateContinuityStates(payload = {}) {
+  const [config, state] = await Promise.all([readConfig(), readState()]);
+  const episode = payload.episodeId
+    ? (state.episodes || []).find((item) => item.id === payload.episodeId)
+    : requireActiveEpisode(state);
+  if (!episode) throw new Error("剧集不存在");
+  if (!(episode.shots || []).length) throw new Error("请先生成分镜脚本");
+  const requestedIds = new Set(Array.isArray(payload.shotIds) ? payload.shotIds : []);
+  const shots = requestedIds.size ? (episode.shots || []).filter((shot) => requestedIds.has(shot.id)) : (episode.shots || []);
+  if (requestedIds.size && !shots.length) throw new Error(`未找到要生成连续性状态的分镜：${[...requestedIds].join(", ")}`);
+  const prompt = buildContinuityStatesPrompt(config, episode, shots, state.cards, state.assetImages || []);
+  const result = await callLlmJson(resolveModelAdapter(config, "shotLlm"), prompt, () => mockContinuityStates(episode, shots));
+  const outputs = normalizeContinuityStates(result.data, shots, state.cards, result.source, result.error || "");
+  if (!outputs.length) throw new Error("模型没有返回可用的连续性状态，请重试");
+  const outputShotIds = new Set(outputs.map((item) => item.shotId));
+  const missingShots = shots.filter((shot) => !outputShotIds.has(shot.id));
+  if (missingShots.length) {
+    throw new Error(`模型未返回这些分镜的连续性状态：${missingShots.map((shot) => shot.id).join(", ")}`);
+  }
+
+  const latestState = await withStateWriteLock(async () => {
+    const nextState = await readState();
+    const latestEpisode = (nextState.episodes || []).find((item) => item.id === episode.id);
+    if (!latestEpisode) throw new Error("剧集不存在");
+    const now = new Date().toISOString();
+    const changedShotIds = [];
+    latestEpisode.continuityStates = mergeContinuityStatesByShot(latestEpisode.continuityStates || [], outputs, now);
+    for (const shot of latestEpisode.shots || []) {
+      const stateRow = outputs.find((item) => item.shotId === shot.id);
+      if (!stateRow) continue;
+      shot.continuityStateId = stateRow.id;
+      shot.continuityUpdatedAt = now;
+      changedShotIds.push(shot.id);
+    }
+    if (changedShotIds.length) {
+      markEpisodeOutputsStaleForShots(latestEpisode, changedShotIds, "continuity-state-updated", now);
+    }
+    touchEpisode(latestEpisode);
+    touchState(nextState);
+    addEvent(nextState, "continuity.generated", `${latestEpisode.title} 已生成 ${outputs.length} 个连续性状态`, result.source, result.error);
+    await writeState(nextState);
+    await syncActiveProject({ state: nextState });
+    return nextState;
+  });
+  return { ok: true, state: latestState, source: result.source, adapterError: result.error || "" };
+}
+
+async function saveShotContinuityState(payload = {}) {
+  const shotId = stringOr(payload.shotId || payload.id, "");
+  if (!shotId) throw new Error("Missing shot id");
+  const latestState = await withStateWriteLock(async () => {
+    const state = await readState();
+    const episode = payload.episodeId
+      ? (state.episodes || []).find((item) => item.id === payload.episodeId)
+      : requireActiveEpisode(state);
+    if (!episode) throw new Error("Episode not found");
+    const shot = (episode.shots || []).find((item) => item.id === shotId);
+    if (!shot) throw new Error("Shot not found");
+    const now = new Date().toISOString();
+    const continuity = normalizeContinuityState(payload.continuity || payload.state || payload, shot, state.cards, "user", "");
+    episode.continuityStates = mergeContinuityStatesByShot(episode.continuityStates || [], [continuity], now);
+    shot.continuityStateId = continuity.id;
+    shot.continuityUpdatedAt = now;
+    markEpisodeOutputsStaleForShots(episode, [shotId], "continuity-state-manual-edit", now);
+    touchEpisode(episode);
+    touchState(state);
+    addEvent(state, "continuity.edited", `${episode.title} ${shotId} 连续性状态已保存`, "user");
+    await writeState(state);
+    await syncActiveProject({ state });
+    return state;
+  });
+  return { ok: true, state: latestState };
+}
+
+async function acceptVariantCandidate(payload = {}) {
+  const episodeId = stringOr(payload.episodeId, "");
+  const shotId = stringOr(payload.shotId, "");
+  const baseAssetId = stringOr(payload.baseAssetId || payload.parentAssetId, "");
+  const name = stringOr(payload.name, "");
+  if (!shotId || !baseAssetId || !name) {
+    throw new Error("Missing variant candidate fields");
+  }
+  const latestState = await withStateWriteLock(async () => {
+    const state = await readState();
+    const episode = episodeId
+      ? (state.episodes || []).find((item) => item.id === episodeId)
+      : requireActiveEpisode(state);
+    if (!episode) throw new Error("Episode not found");
+    const shot = (episode.shots || []).find((item) => item.id === shotId);
+    if (!shot) throw new Error("Shot not found");
+    const baseAsset = findAssetById(state.cards, baseAssetId);
+    if (!baseAsset) throw new Error("Base asset not found");
+    const appliedAssetIds = filterUniqueStrings(payload.appliedAssetIds || inferAppliedAssetIdsForVariantCandidate(payload, episode, shotId));
+    const existing = findExistingVariantAsset(state.cards, baseAssetId, appliedAssetIds, name);
+    const variant = existing || createVariantAssetFromCandidate({
+      candidate: payload,
+      baseAsset,
+      appliedAssetIds,
+      shotId
+    }, state.cards);
+    if (!existing) {
+      const listKey = assetListKey(variant.type);
+      state.cards[listKey] = [...(state.cards[listKey] || []), variant];
+    } else {
+      updateExistingVariantAssetFromCandidate(state.cards, existing.id, {
+        candidate: payload,
+        baseAsset,
+        appliedAssetIds,
+        shotId
+      });
+    }
+    markVariantCandidateAccepted(episode, shotId, baseAssetId, variant.id);
+    for (const ep of state.episodes || []) {
+      ep.promptPackages = hydratePromptPackageReferences(ep.promptPackages || [], state.cards, state.assetImages || []);
+    }
+    touchEpisode(episode);
+    touchState(state);
+    addEvent(state, "asset.variant.accepted", `${variant.name} 已加入资产库，等待生成/上传参考图后由用户应用到分镜`, "user");
+    await writeState(state);
+    await syncActiveProject({ state });
+    return state;
+  });
+  return { ok: true, state: latestState };
+}
+
+async function applyVariantAssetToShot(payload = {}) {
+  const episodeId = stringOr(payload.episodeId, "");
+  const shotId = stringOr(payload.shotId, "");
+  const variantAssetId = stringOr(payload.variantAssetId || payload.assetId, "");
+  if (!shotId || !variantAssetId) {
+    throw new Error("Missing variant asset fields");
+  }
+  const latestState = await withStateWriteLock(async () => {
+    const state = await readState();
+    const episode = episodeId
+      ? (state.episodes || []).find((item) => item.id === episodeId)
+      : requireActiveEpisode(state);
+    if (!episode) throw new Error("Episode not found");
+    const shot = (episode.shots || []).find((item) => item.id === shotId);
+    if (!shot) throw new Error("Shot not found");
+    const variant = findAssetById(state.cards, variantAssetId);
+    if (!variant?.isVariant) throw new Error("Variant asset not found");
+    const parentAssetId = stringOr(variant.parentAssetId || variant.variantOf, "");
+    const validAssetIds = new Set(flattenCards(state.cards).map((asset) => asset.id));
+    const currentRefs = filterAssetRefs(shot.assetRefs || [], validAssetIds);
+    const absorbedAssetIds = absorbedAssetRefsForVariant(variant);
+    const nextRefs = replaceBaseAssetRefWithVariant(currentRefs, parentAssetId, variant.id, absorbedAssetIds).slice(0, MAX_SHOT_ASSET_REFS);
+    const changed = currentRefs.join("|") !== nextRefs.join("|");
+    if (!changed) return state;
+
+    const updatedAt = new Date().toISOString();
+    const removedRefs = currentRefs.filter((id) => !nextRefs.includes(id));
+    const addedRefs = nextRefs.filter((id) => !currentRefs.includes(id));
+    shot.assetRefs = nextRefs;
+    shot.manualEditedAt = updatedAt;
+    shot.updatedAt = updatedAt;
+    applyVariantToShotContinuity(episode, shotId, parentAssetId, variant.id, absorbedAssetIds);
+    episode.promptPackages = (episode.promptPackages || []).map((pack) => {
+      if (pack.shotId !== shotId) return pack;
+      const edited = mergePromptPackageAssetRefs(pack, nextRefs, removedRefs, addedRefs, state.cards, state.assetImages || [], updatedAt);
+      return edited.changed ? edited.pack : pack;
+    });
+    episode.videos = (episode.videos || []).map((video) => video.shotId === shotId
+      ? {
+        ...video,
+        stale: true,
+        staleReason: "variant-asset-applied",
+        staleAt: updatedAt
+      }
+      : video);
+    touchEpisode(episode);
+    touchState(state);
+    addEvent(
+      state,
+      "asset.variant.applied",
+      `${variant.name} 已应用到 ${shotId}，相关提示词和视频需更新`,
+      "user",
+      absorbedAssetIds.length ? `已融合资产不再作为本镜独立参考：${absorbedAssetIds.join(", ")}` : ""
+    );
+    await writeState(state);
+    await syncActiveProject({ state });
+    return state;
+  });
+  return { ok: true, state: latestState };
 }
 
 async function generateAssetImages(payload = {}) {
@@ -682,11 +925,23 @@ async function generateAssetImages(payload = {}) {
 
   const imageAdapter = resolveModelAdapter(config, "assetImageModel");
   const outputs = await runConcurrent(assets, 2, async (asset) => {
-    const prompt = buildAssetImagePrompt(config, asset);
+    const prompt = buildAssetImagePrompt(config, asset, state);
     const style = activeProjectStyle(config.project);
-    const referenceImages = await projectStyleReferenceImages(style);
+    const variantContext = asset.isVariant ? variantAssetPromptContext(asset, state) : null;
+    const referenceImages = asset.isVariant
+      ? await variantAssetReferenceImages(asset, state)
+      : [
+        ...await projectStyleReferenceImages(style)
+      ];
+    const referencePolicyNote = asset.isVariant ? variantReferencePolicyNote(asset, variantContext) : "";
+    const useImageEdit = shouldUseImageEditForVariant(asset);
     try {
-      const result = await callImage(imageAdapter, prompt, assetReferenceAspect(asset.type), () => mockAssetImage(config, asset), { referenceImages });
+      assertVariantReferenceImagesReady(asset, referenceImages);
+      const result = await callImage(imageAdapter, prompt, assetReferenceAspect(asset.type), () => mockAssetImage(config, asset), {
+        referenceImages,
+        requireReferenceImages: Boolean(asset.isVariant),
+        useImageEdit
+      });
       return {
         id: `ASSETIMG-${asset.id}`,
         assetId: asset.id,
@@ -695,6 +950,9 @@ async function generateAssetImages(payload = {}) {
         prompt,
         model: imageAdapter.model || "",
         styleReferenceImages: referenceImages.map(publicReferenceImageInfo),
+        referenceImagePolicy: asset.isVariant ? "required-for-variant" : (referenceImages.length ? "optional" : "none"),
+        referencePolicyNote,
+        imageRequestMode: useImageEdit ? "image-edit" : "image-generation",
         referenceStandard: assetReferenceStandard(asset.type),
         source: result.source,
         adapterError: result.error || "",
@@ -711,6 +969,9 @@ async function generateAssetImages(payload = {}) {
         prompt,
         model: imageAdapter.model || "",
         styleReferenceImages: referenceImages.map(publicReferenceImageInfo),
+        referenceImagePolicy: asset.isVariant ? "required-for-variant" : (referenceImages.length ? "optional" : "none"),
+        referencePolicyNote,
+        imageRequestMode: useImageEdit ? "image-edit" : "image-generation",
         referenceStandard: assetReferenceStandard(asset.type),
         source: "adapter-error",
         adapterError: publicError(error),
@@ -1243,6 +1504,7 @@ async function doGeneratePromptPackages(payload = {}) {
     throw new Error(`未找到要生成提示词的分镜：${[...requestedIds].join(", ")}`);
   }
   const shots = selectedShots.map((shot) => ({ ...shot, durationSec: normalizeClipDuration(shot.durationSec || 15) }));
+  assertPromptPackageShotAssetsReady(shots, state.cards);
   const prompt = buildPromptPackagesPrompt(config, shots, state.cards, state.assetImages || [], episode);
   const result = await callLlmJson(resolveModelAdapter(config, "promptPackageLlm"), prompt, () => mockPromptPackages(config, shots, state.cards, state.assetImages || []));
   const outputs = normalizePromptPackages(result.data, shots, state.cards, state.assetImages || [], result.source, result.error || "", activeVideoProfile(config));
@@ -1545,17 +1807,20 @@ async function callLlmJson(adapter, prompt, fallbackFactory) {
 async function callImage(adapter, prompt, aspectRatio, fallbackFactory, options = {}) {
   if (canUseAdapter(adapter)) {
     try {
-      const endpoint = resolveAdapterEndpoint(adapter, "/images/generations");
-      const payload = buildImagePayload(adapter, prompt, aspectRatio, options);
       let response;
       try {
-        response = await postJson(endpoint, adapter.apiKey, payload, adapter.timeoutMs);
+        response = options.useImageEdit
+          ? await postImageEdit(adapter, prompt, aspectRatio, options)
+          : await postImageGeneration(adapter, prompt, aspectRatio, options);
       } catch (error) {
         if (!hasReferenceImages(options) || !isLikelyUnsupportedReferenceImageError(error)) {
           throw error;
         }
+        if (options.requireReferenceImages) {
+          throw new Error(`当前生图模型不支持或拒绝参考图字段，变体资产不能降级为纯提示词生成：${publicError(error)}`);
+        }
         console.warn(`Image adapter rejected reference image fields; retrying with prompt only: ${error.message}`);
-        response = await postJson(endpoint, adapter.apiKey, buildImagePayload(adapter, prompt, aspectRatio), adapter.timeoutMs);
+        response = await postImageGeneration(adapter, prompt, aspectRatio);
       }
       throwIfAdapterError(response);
       const asset = extractImageAsset(response);
@@ -1582,6 +1847,33 @@ async function callImage(adapter, prompt, aspectRatio, fallbackFactory, options 
   return { source: providerIsMock(adapter) ? "mock" : "mock-fallback", error: skipReason, data: await fallbackFactory() };
 }
 
+async function postImageGeneration(adapter, prompt, aspectRatio, options = {}) {
+  const endpoint = resolveAdapterEndpoint(adapter, "/images/generations");
+  const payload = buildImagePayload(adapter, prompt, aspectRatio, options);
+  return postJson(endpoint, adapter.apiKey, payload, adapter.timeoutMs);
+}
+
+async function postImageEdit(adapter, prompt, aspectRatio, options = {}) {
+  const refs = normalizeReferenceImages(options.referenceImages);
+  if (!refs.length) {
+    return postImageGeneration(adapter, prompt, aspectRatio, options);
+  }
+  const endpoint = resolveAdapterEndpoint(adapter, "/images/edits");
+  const form = new FormData();
+  form.append("model", adapter.model);
+  form.append("prompt", prompt);
+  form.append("n", "1");
+  form.append("size", imageSizeForAspect(aspectRatio));
+  const uploadRefs = refs.slice(0, 4);
+  for (let index = 0; index < uploadRefs.length; index += 1) {
+    const ref = uploadRefs[index];
+    const imageFile = await imageReferenceToUploadFile(ref, index);
+    const fieldName = index === 0 ? "image" : "image[]";
+    form.append(fieldName, imageFile.blob, imageFile.filename);
+  }
+  return postMultipart(endpoint, adapter.apiKey, form, adapter.timeoutMs);
+}
+
 function buildImagePayload(adapter, prompt, aspectRatio, options = {}) {
   const payload = {
         model: adapter.model,
@@ -1594,14 +1886,24 @@ function buildImagePayload(adapter, prompt, aspectRatio, options = {}) {
     payload.reference_images = refs.map((item) => item.url);
     payload.reference_image_urls = refs.map((item) => item.url);
     payload.image_urls = refs.map((item) => item.url);
-    payload.images = refs.map((item) => ({
+    payload.images = refs.map((item, index) => ({
       url: item.url,
       image_url: item.url,
       type: item.kind || "reference",
-      name: item.name || ""
+      name: item.name || "",
+      role: imageReferenceRole(item.kind),
+      index: index + 1
     }));
   }
   return payload;
+}
+
+function imageReferenceRole(kind = "") {
+  return {
+    "variant-parent-asset": "reference_image_1_base_character_identity",
+    "variant-applied-asset": "reference_image_2_equipment_outfit_design",
+    "project-style": "reference_image_3_global_visual_style"
+  }[kind] || "reference_image";
 }
 
 function normalizeReferenceImages(referenceImages = []) {
@@ -2808,7 +3110,7 @@ function buildShotsPrompt(config, script, episode = {}) {
   });
 }
 
-function buildCardsPrompt(config, script, shots, existingCards = {}, assetImages = []) {
+function buildCardsPrompt(config, script, shots, existingCards = {}, assetImages = [], state = {}) {
   return JSON.stringify({
     task: "select_or_create_shot_assets",
     requirement: "从剧本和分镜选择最重要的视频参考资产，并补充真正缺失的角色卡、场景卡、关键道具卡。优先复用同一项目已有资产，不要为同一角色/场景/道具重复命名。输出 JSON。",
@@ -2821,6 +3123,8 @@ function buildCardsPrompt(config, script, shots, existingCards = {}, assetImages
       "Do not bake the global video style, render engine, camera style, lighting style, resolution, aspect ratio, subtitles, or temporary scene mood into asset prompts.",
       "Use project.visualStyle only as context for consistency, not as text to copy into each asset prompt.",
       "selectedAssetRefs must use existing asset ids or ids from the new assets you output.",
+      "Use continuityStates to understand persistent wardrobe, carried props, location hierarchy, damage state, and relationship progress.",
+      "If continuityStates says a character is wearing/carrying/holding something, consider that relationship when selecting shot assets.",
       "For location assets, the most specific current shot location has higher priority than a broader parent area or world asset.",
       "Use a broad/global location asset only for establishing shots, geography, wide-area travel, or when no specific current location exists.",
       "Do not replace a specific current location with a broader asset just because the broader asset already has a reference image.",
@@ -2856,8 +3160,87 @@ function buildCardsPrompt(config, script, shots, existingCards = {}, assetImages
     project: config.project,
     projectVisualStyle: projectAttributes(config.project),
     existingAssets: availableAssetCatalog(existingCards, assetImages),
+    continuityStates: continuityStatesForShots(state, shots).map(compactContinuityState),
     script,
     shots
+  });
+}
+
+function buildContinuityStatesPrompt(config, episode = {}, shots = [], cards = {}, assetImages = []) {
+  const priorStates = (episode.continuityStates || []).map(compactContinuityState).slice(0, 30);
+  return JSON.stringify({
+    task: "extract_short_drama_continuity_states",
+    languagePolicy: promptLanguagePolicy(config.project),
+    rules: [
+      "Return JSON only with shape { continuityStates: [...] }.",
+      "Continuity follows: inherit by default, change only by explicit event.",
+      "For each shot, output the true end-state after that shot, not just visible assets.",
+      "Track character wardrobe, held/carrying props, emotion, pose, injury, location, prop ownership, prop state, scene damage, and relationship progress.",
+      "Do not invent new asset ids. Use existing asset ids when known. Use plain text only when no stable asset exists.",
+      "For every meaningful visual state change, first classify it in stateChanges. Do not jump directly to variantCandidates.",
+      "Only propose variantCandidates for stable reusable visual forms that are hard to reproduce from base reference image plus prompt: wardrobe/equipment change, transformation, persistent injury/damage, prop phase change, or location structural change.",
+      "Never propose variantCandidates for single-shot action, emotion, pose, camera language, temporary glow, temporary dust/smoke/fire/rain, slight dirt, holding/carrying position, or cautious/awkward behavior. Keep those in stateChanges and continuity text instead.",
+      "variantCandidates must be a strict subset of stateChanges where needsVariantAsset is true and persistence is multi_shot or episode_arc.",
+      "Do not create final variant assets here.",
+      "Use Simplified Chinese for production state fields. Spoken dialogue language is irrelevant here.",
+      "Do not output camera directions unless they affect continuity."
+    ],
+    outputSchema: {
+      continuityStates: [
+        {
+          shotId: "SH01",
+          summary: "string",
+          characters: [
+            {
+              assetId: "CHAR01",
+              activeVariantId: "",
+              wearing: ["PROP05"],
+              holding: ["PROP06"],
+              carrying: [{ assetId: "PROP01", position: "左臂抱住" }],
+              emotion: "string",
+              pose: "string",
+              injury: "",
+              location: "string"
+            }
+          ],
+          location: {
+            primaryAssetId: "LOC04",
+            parentAssetIds: ["LOC01"],
+            zone: "string",
+            damageState: "string"
+          },
+          props: [{ assetId: "PROP01", ownerAssetId: "CHAR01", position: "string", state: "string" }],
+          relations: [{ fromAssetId: "CHAR01", toAssetId: "CHAR04", type: "trust", state: "string" }],
+          continuity: { fromPrevious: "string", toNext: "string" },
+          stateChanges: [
+            {
+              assetId: "CHAR01",
+              changeType: "wardrobe_equipment|transformation|persistent_damage|prop_phase_change|location_structural_change|pose_emotion|temporary_effect|holding_carrying|camera_action|minor_dirt|relationship_progress|none",
+              description: "string",
+              persistence: "single_shot|multi_shot|episode_arc",
+              visualImpact: "low|medium|high",
+              promptLayer: "continuity_state|video_prompt_state|variant_candidate",
+              needsVariantAsset: true
+            }
+          ],
+          variantCandidates: [{ baseAssetId: "CHAR01", sourceChangeType: "wardrobe_equipment", name: "Benson 新手套装形态", reason: "string", priority: "low|medium|high" }]
+        }
+      ]
+    },
+    project: config.project,
+    episode: {
+      id: episode.id || "",
+      title: episode.title || "",
+      order: episode.order || 1,
+      synopsis: episode.synopsis || episode.script?.synopsis || ""
+    },
+    existingAssets: availableAssetCatalog(cards, assetImages),
+    previousContinuityStates: priorStates,
+    shots: shots.map((shot) => ({
+      ...compactShotForPromptPackage(shot),
+      assetNotes: shot.assetNotes || "",
+      visualNotes: shot.visualNotes || ""
+    }))
   });
 }
 
@@ -2882,6 +3265,8 @@ function buildPromptPackagesPrompt(config, shots, cards, assetImages, episode = 
       "Time ranges must cover the full duration without exceeding durationSec.",
       "For short shots, keep each subShot direct and executable. Do not squeeze extra story beats into a short duration.",
       "Every major action or reveal described in the shot action must appear in at least one subShot. If a beat cannot fit, simplify within the same dramatic intention instead of adding unrelated filler.",
+      "Use continuityStates to express relationships between assets: who wears what, who holds/carries what, where props are, scene damage, and relationship progress.",
+      "Do not list related assets as separate unrelated objects. Write relationships naturally, for example @Benson wearing @新手套装 and holding @紫色龙蛋.",
       "Keep continuity of character identity, prop positions, scene layout, human scale, and visual style.",
       "Do not create storyboard images or first-frame image prompts.",
       "soundDesign, audio.content, cameraLanguage, blocking, composition, and action are production guidance fields; prefer Simplified Chinese for user review.",
@@ -2919,6 +3304,7 @@ function buildPromptPackagesPrompt(config, shots, cards, assetImages, episode = 
       order: episode.order || 1
     },
     shots: shots.map(compactShotForPromptPackage),
+    continuityStates: continuityStatesForShots({ episodes: [episode] }, shots).map(compactContinuityState),
     shotAssetCatalog: shotAssetCatalogForPromptPackages(shots, cards, assetImages),
     availableAssets: availableAssetCatalog(cards, assetImages)
   });
@@ -2949,7 +3335,556 @@ function compactShotForPromptPackage(shot = {}) {
   };
 }
 
-function buildAssetImagePrompt(config, asset) {
+function continuityStatesForShots(state = {}, shots = []) {
+  const requested = new Set((shots || []).map((shot) => shot.id).filter(Boolean));
+  return (state.episodes || []).flatMap((episode) => (episode.continuityStates || []))
+    .filter((row) => !requested.size || requested.has(row.shotId));
+}
+
+function compactContinuityState(row = {}) {
+  return {
+    id: row.id || "",
+    shotId: row.shotId || "",
+    summary: shortText(row.summary || "", 220),
+    characters: (row.characters || []).slice(0, 6),
+    location: row.location || {},
+    props: (row.props || []).slice(0, 8),
+    relations: (row.relations || []).slice(0, 8),
+    continuity: row.continuity || {},
+    stateChanges: (row.stateChanges || []).slice(0, 8),
+    variantCandidates: (row.variantCandidates || []).slice(0, 6)
+  };
+}
+
+function normalizeContinuityStates(data = {}, shots = [], cards = {}, source = "", adapterError = "") {
+  const rows = Array.isArray(data?.continuityStates) ? data.continuityStates : Array.isArray(data?.states) ? data.states : Array.isArray(data) ? data : [];
+  return rows.map((row, index) => {
+    const shot = shots.find((item) => item.id === row.shotId) || shots[index] || {};
+    if (!shot.id) return null;
+    return normalizeContinuityState(row, shot, cards, source, adapterError);
+  }).filter(Boolean);
+}
+
+function normalizeExistingContinuityStates(rows = [], shots = [], cards = {}) {
+  return (Array.isArray(rows) ? rows : []).map((row, index) => {
+    const shot = shots.find((item) => item.id === row.shotId) || shots[index] || { id: row.shotId || "" };
+    if (!shot.id) return null;
+    return normalizeContinuityState(row, shot, cards, row.source || "stored", row.adapterError || "");
+  }).filter(Boolean);
+}
+
+function normalizeContinuityState(row = {}, shot = {}, cards = {}, source = "", adapterError = "") {
+  const validIds = new Set(flattenCards(cards).map((asset) => asset.id));
+  const now = new Date().toISOString();
+  const assetId = (value) => validIds.has(value) ? value : "";
+  const assetIds = (value) => filterUniqueStrings(Array.isArray(value) ? value : []).filter((id) => validIds.has(id));
+  return {
+    id: stringOr(row.id, `CONT-${shot.id}`),
+    shotId: stringOr(row.shotId, shot.id || ""),
+    summary: stringOr(row.summary, ""),
+    characters: (Array.isArray(row.characters) ? row.characters : []).map((item) => ({
+      assetId: assetId(item.assetId || item.asset_id),
+      activeVariantId: stringOr(item.activeVariantId || item.active_variant_id, ""),
+      wearing: assetIds(item.wearing),
+      holding: assetIds(item.holding),
+      carrying: (Array.isArray(item.carrying) ? item.carrying : []).map((carry) => ({
+        assetId: assetId(carry.assetId || carry.asset_id),
+        position: stringOr(carry.position, "")
+      })).filter((carry) => carry.assetId || carry.position),
+      emotion: stringOr(item.emotion, ""),
+      pose: stringOr(item.pose, ""),
+      injury: stringOr(item.injury, ""),
+      location: stringOr(item.location, "")
+    })).filter((item) => item.assetId || item.emotion || item.pose || item.location),
+    location: {
+      primaryAssetId: assetId(row.location?.primaryAssetId || row.location?.primary_asset_id),
+      parentAssetIds: assetIds(row.location?.parentAssetIds || row.location?.parent_asset_ids),
+      zone: stringOr(row.location?.zone, ""),
+      damageState: stringOr(row.location?.damageState || row.location?.damage_state, "")
+    },
+    props: (Array.isArray(row.props) ? row.props : []).map((item) => ({
+      assetId: assetId(item.assetId || item.asset_id),
+      ownerAssetId: assetId(item.ownerAssetId || item.owner_asset_id),
+      position: stringOr(item.position, ""),
+      state: stringOr(item.state, "")
+    })).filter((item) => item.assetId || item.position || item.state),
+    relations: (Array.isArray(row.relations) ? row.relations : []).map((item) => ({
+      fromAssetId: assetId(item.fromAssetId || item.from_asset_id),
+      toAssetId: assetId(item.toAssetId || item.to_asset_id),
+      type: stringOr(item.type, ""),
+      state: stringOr(item.state, "")
+    })).filter((item) => item.fromAssetId || item.toAssetId || item.type || item.state),
+    continuity: {
+      fromPrevious: stringOr(row.continuity?.fromPrevious || row.continuity?.from_previous, ""),
+      toNext: stringOr(row.continuity?.toNext || row.continuity?.to_next, "")
+    },
+    stateChanges: normalizeContinuityStateChanges(row.stateChanges || row.state_changes, validIds),
+    variantCandidates: normalizeVariantCandidates(row.variantCandidates || row.variant_candidates, row.stateChanges || row.state_changes, validIds, row, cards),
+    source,
+    adapterError,
+    updatedAt: now,
+    createdAt: row.createdAt || now
+  };
+}
+
+function normalizeContinuityStateChanges(rows = [], validIds = new Set()) {
+  return (Array.isArray(rows) ? rows : []).map((item) => {
+    const changeType = normalizeContinuityChangeType(item.changeType || item.change_type || item.type);
+    const persistence = normalizeContinuityPersistence(item.persistence);
+    const visualImpact = normalizeContinuityVisualImpact(item.visualImpact || item.visual_impact);
+    return {
+      assetId: validIds.has(item.assetId || item.asset_id) ? (item.assetId || item.asset_id) : "",
+      changeType,
+      description: stringOr(item.description, ""),
+      persistence,
+      visualImpact,
+      promptLayer: normalizeContinuityPromptLayer(item.promptLayer || item.prompt_layer),
+      needsVariantAsset: booleanLike(item.needsVariantAsset ?? item.needs_variant_asset, false) && continuityChangeQualifiesForVariant({ changeType, persistence, visualImpact })
+    };
+  }).filter((item) => item.assetId || item.description || item.changeType !== "none");
+}
+
+function normalizeVariantCandidates(rows = [], stateChanges = [], validIds = new Set(), continuityRow = {}, cards = {}) {
+  const changes = normalizeContinuityStateChanges(stateChanges, validIds);
+  const changeByAsset = new Map();
+  for (const change of changes) {
+    if (!change.assetId || !continuityChangeQualifiesForVariant(change)) continue;
+    const existing = changeByAsset.get(change.assetId);
+    if (!existing || continuityImpactRank(change.visualImpact) > continuityImpactRank(existing.visualImpact)) {
+      changeByAsset.set(change.assetId, change);
+    }
+  }
+  const explicitCandidates = (Array.isArray(rows) ? rows : []).map((item) => {
+    const baseAssetId = validIds.has(item.baseAssetId || item.base_asset_id) ? (item.baseAssetId || item.base_asset_id) : "";
+    const sourceChangeType = normalizeContinuityChangeType(item.sourceChangeType || item.source_change_type || item.changeType || item.change_type);
+    const candidate = {
+      baseAssetId,
+      sourceChangeType,
+      name: stringOr(item.name, ""),
+      reason: stringOr(item.reason, ""),
+      priority: ["low", "medium", "high"].includes(String(item.priority || "").toLowerCase()) ? String(item.priority).toLowerCase() : "medium",
+      status: stringOr(item.status, "suggested"),
+      acceptedVariantId: validIds.has(item.acceptedVariantId || item.accepted_variant_id) ? (item.acceptedVariantId || item.accepted_variant_id) : ""
+    };
+    const matchedChange = changeByAsset.get(baseAssetId) || inferContinuityChangeFromVariantCandidate(candidate);
+    const change = {
+      ...matchedChange,
+      changeType: sourceChangeType !== "none" ? sourceChangeType : matchedChange?.changeType || sourceChangeType
+    };
+    return continuityVariantCandidateQualifies(candidate, change) ? candidate : null;
+  }).filter(Boolean);
+  return mergeVariantCandidates([
+    ...explicitCandidates,
+    ...variantCandidatesFromWearingState(continuityRow, cards, validIds)
+  ]).slice(0, 6);
+}
+
+function mergeVariantCandidates(candidates = []) {
+  const output = [];
+  for (const candidate of candidates || []) {
+    if (!candidate?.baseAssetId || !candidate.name) continue;
+    const key = `${candidate.baseAssetId}:${candidate.name}`;
+    const existingIndex = output.findIndex((item) => `${item.baseAssetId}:${item.name}` === key);
+    if (existingIndex >= 0) {
+      if (variantCandidateRank(candidate) > variantCandidateRank(output[existingIndex])) {
+        output[existingIndex] = candidate;
+      }
+      continue;
+    }
+    output.push(candidate);
+  }
+  return output.sort((a, b) => priorityRank(b.priority) - priorityRank(a.priority));
+}
+
+function variantCandidateRank(candidate = {}) {
+  const statusRank = candidate.status === "accepted" ? 100 : 0;
+  const acceptedRank = candidate.acceptedVariantId ? 10 : 0;
+  return statusRank + acceptedRank + priorityRank(candidate.priority);
+}
+
+function variantCandidatesFromWearingState(row = {}, cards = {}, validIds = new Set()) {
+  const assets = flattenCards(cards);
+  const byId = new Map(assets.map((asset) => [asset.id, asset]));
+  const candidates = [];
+  for (const character of Array.isArray(row.characters) ? row.characters : []) {
+    const characterId = character.assetId || character.asset_id || "";
+    const characterAsset = byId.get(characterId);
+    if (!characterId || !validIds.has(characterId) || normalizeAssetType(characterAsset?.type) !== "character") continue;
+    for (const wearableId of Array.isArray(character.wearing) ? character.wearing : []) {
+      const wearable = byId.get(wearableId);
+      if (!wearable || !validIds.has(wearableId) || !assetLooksWearable(wearable)) continue;
+      const characterName = characterAsset.name || characterId;
+      const wearableName = wearable.name || wearableId;
+      candidates.push({
+        baseAssetId: characterId,
+        sourceChangeType: "wardrobe_equipment",
+        name: `${characterName} ${wearableName}形态`,
+        reason: `${characterName} 正在稳定穿戴 ${wearableName}，这属于角色身份和外观会持续影响多个分镜的装备/换装状态，适合作为可复用变体资产候选。`,
+        priority: "high",
+        status: "suggested"
+      });
+    }
+  }
+  return candidates;
+}
+
+function assetLooksWearable(asset = {}) {
+  if (normalizeAssetType(asset.type) !== "prop") return false;
+  const text = normalizeAssetName([asset.id, asset.name, asset.prompt, asset.description, asset.function, asset.look].filter(Boolean).join(" "));
+  return [
+    "套装",
+    "盔甲",
+    "护甲",
+    "头盔",
+    "装备",
+    "衣",
+    "服装",
+    "披风",
+    "面具",
+    "armor",
+    "outfit",
+    "costume",
+    "helmet",
+    "equipment"
+  ].some((term) => text.includes(normalizeAssetName(term)));
+}
+
+function inferAppliedAssetIdsForVariantCandidate(candidate = {}, episode = {}, shotId = "") {
+  const baseAssetId = candidate.baseAssetId || candidate.base_asset_id || candidate.parentAssetId || "";
+  const row = (episode.continuityStates || []).find((item) => item.shotId === shotId) || {};
+  const applied = [];
+  for (const character of row.characters || []) {
+    if (character.assetId !== baseAssetId) continue;
+    applied.push(...(character.wearing || []));
+  }
+  return filterUniqueStrings(applied);
+}
+
+function findExistingVariantAsset(cards = {}, baseAssetId = "", appliedAssetIds = [], name = "") {
+  const targetApplied = [...filterUniqueStrings(appliedAssetIds)].sort().join("|");
+  const targetName = normalizeAssetName(name);
+  return flattenCards(cards).find((asset) => {
+    if (!asset?.isVariant || asset.parentAssetId !== baseAssetId) return false;
+    const applied = [...filterUniqueStrings(asset.appliedAssetIds || [])].sort().join("|");
+    return applied === targetApplied || (targetName && normalizeAssetName(asset.name) === targetName);
+  }) || null;
+}
+
+function createVariantAssetFromCandidate({ candidate = {}, baseAsset = {}, appliedAssetIds = [], shotId = "" } = {}, cards = {}) {
+  const parentType = normalizeAssetType(baseAsset.type);
+  const variantId = nextVariantAssetId(cards, baseAsset.id);
+  const reason = stringOr(candidate.reason, "");
+  const prompt = [
+    `${candidate.name}，属于 ${baseAsset.name || baseAsset.id} 的稳定变体资产。`,
+    `保持 ${baseAsset.name || baseAsset.id} 的身份、脸型/比例/材质风格和项目统一风格。`,
+    appliedAssetIds.length ? `融合穿戴/装备资产：${appliedAssetIds.join(", ")}。` : "",
+    reason ? `变体原因：${reason}` : "",
+    "生成参考图时应表现完整稳定外观，不要表现单镜头动作、情绪、临时光效或轻微脏污。"
+  ].filter(Boolean).join("\n");
+  return manualAssetCard({
+    id: variantId,
+    type: parentType,
+    name: stringOr(candidate.name, `${baseAsset.name || baseAsset.id} 变体`),
+    prompt,
+    description: prompt,
+    source: "variant-candidate"
+  }, {
+    isVariant: true,
+    parentAssetId: baseAsset.id,
+    variantOf: baseAsset.id,
+    appliedAssetIds: filterUniqueStrings(appliedAssetIds),
+    sourceShotIds: shotId ? [shotId] : [],
+    variantStatus: "draft",
+    sourceChangeType: stringOr(candidate.sourceChangeType || candidate.source_change_type, "wardrobe_equipment"),
+    variantReason: reason,
+    createdFrom: {
+      baseAssetId: baseAsset.id,
+      appliedAssetIds: filterUniqueStrings(appliedAssetIds),
+      sourceShotId: shotId
+    }
+  });
+}
+
+function updateExistingVariantAssetFromCandidate(cards = {}, variantId = "", { candidate = {}, baseAsset = {}, appliedAssetIds = [], shotId = "" } = {}) {
+  const sourceListKey = ["characters", "locations", "props"].find((key) => (cards[key] || []).some((asset) => asset.id === variantId));
+  if (!sourceListKey) return null;
+  const next = createVariantAssetFromCandidate({ candidate, baseAsset, appliedAssetIds, shotId }, cards);
+  const nextName = stringOr(candidate.name, next.name || baseAsset.name || variantId);
+  const updated = (cards[sourceListKey] || []).map((asset) => asset.id === variantId
+    ? {
+      ...asset,
+      name: nextName,
+      aliases: normalizeAliases(nextName),
+      prompt: next.prompt || asset.prompt,
+      description: next.description || asset.description,
+      role: asset.role && !asset.role.includes("?") ? asset.role : next.role,
+      appearance: asset.appearance && !asset.appearance.includes("?") ? asset.appearance : next.appearance,
+      parentAssetId: asset.parentAssetId || next.parentAssetId,
+      variantOf: asset.variantOf || next.variantOf,
+      appliedAssetIds: filterUniqueStrings([...(asset.appliedAssetIds || []), ...(next.appliedAssetIds || [])]),
+      sourceShotIds: filterUniqueStrings([...(asset.sourceShotIds || []), ...(next.sourceShotIds || [])]),
+      variantReason: next.variantReason || asset.variantReason,
+      sourceChangeType: next.sourceChangeType || asset.sourceChangeType,
+      isVariant: true,
+      variantStatus: asset.variantStatus || "draft",
+      createdFrom: asset.createdFrom || next.createdFrom
+    }
+    : asset);
+  const targetListKey = assetListKey(baseAsset.type);
+  if (sourceListKey === targetListKey) {
+    cards[sourceListKey] = updated;
+  } else {
+    const moved = updated.find((asset) => asset.id === variantId);
+    cards[sourceListKey] = updated.filter((asset) => asset.id !== variantId);
+    cards[targetListKey] = [...(cards[targetListKey] || []).filter((asset) => asset.id !== variantId), moved];
+  }
+  return findAssetById(cards, variantId);
+}
+
+function nextVariantAssetId(cards = {}, baseAssetId = "") {
+  const used = new Set(flattenCards(cards).map((asset) => asset.id));
+  const base = `${baseAssetId}-V`;
+  for (let index = 1; index < 1000; index += 1) {
+    const id = `${base}${String(index).padStart(2, "0")}`;
+    if (!used.has(id)) return id;
+  }
+  return `${base}${Date.now()}`;
+}
+
+function applyVariantToShotContinuity(episode = {}, shotId = "", baseAssetId = "", variantId = "", absorbedAssetIds = []) {
+  const absorbedSet = new Set(absorbedAssetIds || []);
+  episode.continuityStates = (episode.continuityStates || []).map((row) => {
+    if (row.shotId !== shotId) return row;
+    return {
+      ...row,
+      characters: (row.characters || []).map((character) => character.assetId === baseAssetId
+        ? {
+          ...character,
+          activeVariantId: variantId,
+          wearing: (character.wearing || []).filter((id) => !absorbedSet.has(id))
+        }
+        : character),
+      variantCandidates: (row.variantCandidates || []).map((candidate) => candidate.baseAssetId === baseAssetId
+        ? { ...candidate, status: "accepted", acceptedVariantId: variantId }
+        : candidate)
+    };
+  });
+}
+
+function markVariantCandidateAccepted(episode = {}, shotId = "", baseAssetId = "", variantId = "") {
+  episode.continuityStates = (episode.continuityStates || []).map((row) => {
+    if (row.shotId !== shotId) return row;
+    return {
+      ...row,
+      variantCandidates: (row.variantCandidates || []).map((candidate) => candidate.baseAssetId === baseAssetId
+        ? { ...candidate, status: "accepted", acceptedVariantId: variantId }
+        : candidate)
+    };
+  });
+}
+
+function replaceBaseAssetRefWithVariant(refs = [], baseAssetId = "", variantId = "", absorbedAssetIds = []) {
+  const absorbedSet = new Set(absorbedAssetIds || []);
+  const next = [];
+  for (const ref of refs || []) {
+    if (absorbedSet.has(ref)) continue;
+    next.push(ref === baseAssetId ? variantId : ref);
+  }
+  if (!next.includes(variantId)) next.unshift(variantId);
+  return filterUniqueStrings(next);
+}
+
+function absorbedAssetRefsForVariant(variant = {}) {
+  if (!variant?.isVariant) return [];
+  const type = normalizeAssetType(variant.type);
+  const changeType = String(variant.sourceChangeType || "").toLowerCase();
+  if (type === "character" && /wardrobe|equipment|outfit|armor|clothing|gear/.test(changeType)) {
+    return filterUniqueStrings(variant.appliedAssetIds || []);
+  }
+  return [];
+}
+
+function inferContinuityChangeFromVariantCandidate(candidate = {}) {
+  const text = `${candidate.name || ""} ${candidate.reason || ""}`;
+  const changeType = inferContinuityChangeTypeFromText(text);
+  if (!continuityChangeQualifiesForVariant({ changeType, persistence: "multi_shot", visualImpact: "medium" })) {
+    return { changeType: "none", persistence: "single_shot", visualImpact: "low" };
+  }
+  return {
+    assetId: candidate.baseAssetId || "",
+    changeType,
+    description: candidate.reason || candidate.name || "",
+    persistence: "multi_shot",
+    visualImpact: candidate.priority === "high" ? "high" : "medium",
+    promptLayer: "variant_candidate",
+    needsVariantAsset: true
+  };
+}
+
+function inferContinuityChangeTypeFromText(text = "") {
+  const value = String(text || "").toLowerCase();
+  const hasAny = (terms) => terms.some((term) => value.includes(term.toLowerCase()));
+  if (hasAny(["沾灰", "落灰", "尘土", "灰尘", "轻微脏", "泥点", "汗水", "dust", "minor dirt"])) return "minor_dirt";
+  if (hasAny(["探头", "警惕", "害怕", "尴尬", "安抚", "姿态", "跳舞", "奔跑", "摔倒", "pose", "emotion"])) return "pose_emotion";
+  if (hasAny(["脉冲", "发光", "光效", "照亮", "震动", "烟雾", "火光", "glow", "temporary effect"])) return "temporary_effect";
+  if (hasAny(["手持", "插地", "诱饵", "抱住", "携带", "holding", "carrying"])) return "holding_carrying";
+  if (hasAny(["好感", "信任", "关系", "trust", "relationship"])) return "relationship_progress";
+  if (hasAny(["套装", "盔甲", "护甲", "换装", "装备", "面具", "披风", "armor", "outfit", "costume", "equipment"])) return "wardrobe_equipment";
+  if (hasAny(["变身", "觉醒", "黑化", "升级", "进化形态", "transformation", "evolved"])) return "transformation";
+  if (hasAny(["持续受伤", "伤痕", "断裂", "破损形态", "污染形态", "persistent damage"])) return "persistent_damage";
+  if (hasAny(["裂纹", "裂开", "孵化", "启动", "核心形态", "phase", "activated"])) return "prop_phase_change";
+  if (hasAny(["被毁", "坍塌", "炸毁", "重建", "结构变化", "撞开后", "structural"])) return "location_structural_change";
+  return "none";
+}
+
+function continuityVariantCandidateQualifies(candidate = {}, change = {}) {
+  if (!candidate.baseAssetId || !candidate.name) return false;
+  if (continuityVariantCandidateHasTemporarySignal(candidate)) return false;
+  return continuityChangeQualifiesForVariant(change);
+}
+
+function continuityVariantCandidateHasTemporarySignal(candidate = {}) {
+  const text = `${candidate.name || ""} ${candidate.reason || ""}`.toLowerCase();
+  const temporaryTerms = [
+    "沾灰",
+    "落灰",
+    "尘土",
+    "灰尘",
+    "轻微脏",
+    "泥点",
+    "汗水",
+    "探头",
+    "警惕",
+    "害怕",
+    "尴尬",
+    "安抚",
+    "姿态",
+    "跳舞",
+    "奔跑",
+    "摔倒",
+    "停顿",
+    "照亮",
+    "脉冲",
+    "发光",
+    "光效",
+    "震动",
+    "烟雾",
+    "火光",
+    "手持",
+    "插地",
+    "诱饵",
+    "靠近",
+    "好感",
+    "glow",
+    "dust",
+    "pose",
+    "emotion",
+    "holding",
+    "temporary"
+  ];
+  return temporaryTerms.some((term) => text.includes(term));
+}
+
+function continuityChangeQualifiesForVariant(change = {}) {
+  const eligibleTypes = new Set([
+    "wardrobe_equipment",
+    "transformation",
+    "persistent_damage",
+    "prop_phase_change",
+    "location_structural_change"
+  ]);
+  return eligibleTypes.has(normalizeContinuityChangeType(change.changeType))
+    && ["multi_shot", "episode_arc"].includes(normalizeContinuityPersistence(change.persistence))
+    && ["medium", "high"].includes(normalizeContinuityVisualImpact(change.visualImpact));
+}
+
+function normalizeContinuityChangeType(value = "") {
+  const normalized = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const aliases = {
+    equipment: "wardrobe_equipment",
+    wardrobe: "wardrobe_equipment",
+    outfit: "wardrobe_equipment",
+    damage: "persistent_damage",
+    injury: "persistent_damage",
+    prop_state: "prop_phase_change",
+    scene_damage: "location_structural_change",
+    location_damage: "location_structural_change",
+    pose: "pose_emotion",
+    emotion: "pose_emotion",
+    action: "camera_action",
+    effect: "temporary_effect",
+    dirt: "minor_dirt"
+  };
+  const valueOrAlias = aliases[normalized] || normalized;
+  return [
+    "wardrobe_equipment",
+    "transformation",
+    "persistent_damage",
+    "prop_phase_change",
+    "location_structural_change",
+    "pose_emotion",
+    "temporary_effect",
+    "holding_carrying",
+    "camera_action",
+    "minor_dirt",
+    "relationship_progress",
+    "none"
+  ].includes(valueOrAlias) ? valueOrAlias : "none";
+}
+
+function normalizeContinuityPersistence(value = "") {
+  const normalized = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["multi", "multi_shots", "multiple_shots", "long_term"].includes(normalized)) return "multi_shot";
+  if (["episode", "episode_long", "arc"].includes(normalized)) return "episode_arc";
+  return ["single_shot", "multi_shot", "episode_arc"].includes(normalized) ? normalized : "single_shot";
+}
+
+function normalizeContinuityVisualImpact(value = "") {
+  const normalized = String(value || "").trim().toLowerCase();
+  return ["low", "medium", "high"].includes(normalized) ? normalized : "low";
+}
+
+function normalizeContinuityPromptLayer(value = "") {
+  const normalized = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  return ["continuity_state", "video_prompt_state", "variant_candidate"].includes(normalized) ? normalized : "continuity_state";
+}
+
+function booleanLike(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "yes", "1", "y"].includes(normalized)) return true;
+    if (["false", "no", "0", "n"].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
+function continuityImpactRank(value = "") {
+  return { low: 1, medium: 2, high: 3 }[normalizeContinuityVisualImpact(value)] || 0;
+}
+
+function priorityRank(value = "") {
+  return { low: 1, medium: 2, high: 3 }[String(value || "").toLowerCase()] || 0;
+}
+
+function mergeContinuityStatesByShot(previous = [], next = [], updatedAt = new Date().toISOString()) {
+  const byShot = new Map((previous || []).map((row) => [row.shotId, row]));
+  for (const row of next || []) {
+    if (!row?.shotId) continue;
+    const existing = byShot.get(row.shotId) || {};
+    byShot.set(row.shotId, {
+      ...existing,
+      ...row,
+      id: row.id || existing.id || `CONT-${row.shotId}`,
+      createdAt: existing.createdAt || row.createdAt || updatedAt,
+      updatedAt
+    });
+  }
+  return [...byShot.values()].sort((a, b) => String(a.shotId || "").localeCompare(String(b.shotId || ""), "en", { numeric: true }));
+}
+
+function buildAssetImagePrompt(config, asset, state = {}) {
   const projectStyle = activeProjectStyle(config.project);
   const standard = assetReferenceStandard(asset.type);
   const identity = asset.description || asset.prompt || asset.name;
@@ -2959,6 +3894,41 @@ function buildAssetImagePrompt(config, asset) {
     "Use square head, cuboid torso, cuboid arms and legs, blocky hair volumes, voxel-like facial planes, and PBR textured blocks.",
     "Do not generate a normal smooth realistic human, Pixar-like round cartoon, anime figure, Lego/minifigure toy, or soft doll anatomy."
   ].join(" ") : "";
+  if (asset.isVariant) {
+    const variantContext = variantAssetPromptContext(asset, state);
+    const variantReferenceText = variantAssetReferencePromptText(asset, variantContext);
+    const variantRules = variantAssetTransferRules(asset);
+    const appliedBrief = variantAppliedAssetBrief(variantContext.appliedAssets);
+    const compactAppliedBrief = variantAppliedAssetCompactBrief(variantContext.appliedAssets);
+    const conciseVariantPrompt = conciseVariantAssetImagePrompt({
+      asset,
+      styleDirectives,
+      blockyStyleBoost,
+      standard,
+      variantReferenceText,
+      variantRules,
+      appliedBrief,
+      compactAppliedBrief
+    });
+    if (conciseVariantPrompt) {
+      return conciseVariantPrompt;
+    }
+    return [
+      "TOP PRIORITY - IMAGE-TO-IMAGE VARIANT ASSET.",
+      `Goal: create ${asset.name} as a stable reusable variant reference sheet.`,
+      variantReferenceText,
+      "Image references are authoritative. If any text conflicts with a reference image, follow the image.",
+      variantRules,
+      appliedBrief,
+      asset.variantReason ? `Why this variant exists: ${asset.variantReason}.` : "",
+      `Project visual style: ${styleDirectives}.`,
+      blockyStyleBoost,
+      `Secondary variant text context: ${identity}.`,
+      `Reference sheet standard: ${standard}.`,
+      "Do not show temporary action, emotion, dirt, glow, dust, motion blur, camera angle, or one-shot behavior. Show the stable reusable appearance only.",
+      "All panels must depict the same final variant identity with consistent proportions, face, outfit/equipment, materials, and colors."
+    ].filter(Boolean).join("\n");
+  }
   return [
     "TOP PRIORITY - PROJECT VISUAL STYLE. The asset reference sheet must follow this style before anything else.",
     `Apply this style directly to the asset subject: ${styleDirectives}.`,
@@ -3045,6 +4015,220 @@ async function projectStyleReferenceImages(style = {}) {
   }];
 }
 
+function variantAssetPromptContext(asset = {}, state = {}) {
+  const cards = state.cards || {};
+  const parentId = asset.parentAssetId || asset.variantOf || "";
+  const appliedIds = filterUniqueStrings(asset.appliedAssetIds || []);
+  return {
+    parentAsset: parentId ? findAssetById(cards, parentId) : null,
+    appliedAssets: appliedIds.map((id) => findAssetById(cards, id)).filter(Boolean)
+  };
+}
+
+function conciseVariantAssetImagePrompt({ asset = {}, styleDirectives = "", blockyStyleBoost = "", standard = "", variantReferenceText = "", variantRules = "", appliedBrief = "", compactAppliedBrief = "" } = {}) {
+  const type = normalizeAssetType(asset.type);
+  const changeType = String(asset.sourceChangeType || "").toLowerCase();
+  if (type === "character" && /wardrobe|equipment|outfit|armor|clothing|gear/.test(changeType)) {
+    return [
+      `图1人物穿着图2及后续参考图中的装备/服装，生成 ${asset.name} 的完整三视图。`,
+      "图1是主参考和身份锚点：保留图1人物的脸、发型、发色、眼睛、肤色、头部轮廓、身体比例和整体角色身份。",
+      "图2及后续参考图只作为装备/服装设计参考：把装备穿到图1人物身上，只转移装备结构、颜色、材质、宝石、肩甲、护臂、腰部、腿甲、靴甲等穿戴设计，不转移图2的人脸、发型、肤色、姿势、背景或人物身份。",
+      "如果图2或装备名称表现为套装、护甲套装、outfit、armor set、full gear，必须完整覆盖上半身和下半身，不要只生成头盔、胸甲和护臂后留下图1原裤子或原鞋。",
+      "最终结果必须是：图1里的同一个人物，穿上图2及后续参考图里的装备/服装。",
+      compactAppliedBrief,
+      styleDirectives ? `保持项目画风：${styleDirectives}。` : "",
+      blockyStyleBoost,
+      standard ? `输出标准：${standard}。` : "",
+      "输出一张干净的角色设定三视图：正面、侧面、背面；同一个角色、同一套装备、同一发型和比例；全身可见，站姿中性，浅色干净背景，无文字、无水印、无额外角色、无动作场景。"
+    ].filter(Boolean).join("\n");
+  }
+  return "";
+}
+
+function variantAssetReferencePromptText(asset = {}, context = {}) {
+  const parent = context.parentAsset || {};
+  const appliedAssets = context.appliedAssets || [];
+  const parentLabel = [asset.parentAssetId || asset.variantOf || "base asset", parent.name].filter(Boolean).join(" / ");
+  const textOnlyApplied = shouldUseTextOnlyAppliedVariantReference(asset, "variant-applied-asset");
+  const appliedLabel = appliedAssets.length
+    ? appliedAssets.map((item, index) => `Reference image ${index + 2} = ${item.id} / ${item.name}`).join("; ")
+    : "";
+  return [
+    `Reference image 1 = ${parentLabel}. This is the base identity and the main subject. Preserve it exactly.`,
+    appliedLabel && !textOnlyApplied ? `${appliedLabel}. These are applied change references, not new identities.` : "",
+    appliedLabel && textOnlyApplied ? "Applied change assets are described as text only for this variant to avoid importing another character identity from their images." : ""
+  ].filter(Boolean).join("\n");
+}
+
+function variantAssetTransferRules(asset = {}) {
+  const type = normalizeAssetType(asset.type);
+  const changeType = String(asset.sourceChangeType || "").toLowerCase();
+  if (type === "character" && /wardrobe|equipment|outfit|armor|clothing|gear/.test(changeType)) {
+    return [
+      "Character equipment transfer rules:",
+      "- Keep Reference image 1 as the same person/character: visible face, eyes, hair color and hairstyle, skin tone, head shape, body proportions, and blocky anatomy must stay from Reference image 1.",
+      "- Treat Reference image 2 as a mannequin wearing equipment. Transfer only wearable parts: helmet/headgear, chest armor/top, shoulder armor, arm guards/gloves, belt/waist armor, hip plates, thigh/leg armor, knee/shin guards, boot armor/footwear, accessories, plates, colors, materials, gems, straps, and placement.",
+      "- Do not transfer Reference image 2's face, skin tone, hair, body identity, pose, background, or personality.",
+      "- Put the equipment on top of the Reference image 1 character. Shirt, pants, and shoes from Reference image 1 may be covered or replaced by the outfit/equipment where the applied design covers those body regions. Preserve only still-visible clothing edges.",
+      "- If the applied asset is a full set, outfit, uniform, armor set, or full gear, transfer the full head-to-toe set and do not leave the lower body as the unchanged base pants/shoes unless the applied design is explicitly upper-body-only.",
+      "- The final subject must look like Reference image 1 after changing outfit/equipment, not like Reference image 2."
+    ].join("\n");
+  }
+  if (type === "character") {
+    return [
+      "Character variant rules:",
+      "- Keep Reference image 1 as the same character identity: face, hair, body proportions, silhouette, and recognizable colors.",
+      "- Apply only the persistent state change described by the applied references and text.",
+      "- Do not convert temporary action, emotion, lighting, dirt, or camera effects into the character design."
+    ].join("\n");
+  }
+  if (type === "location") {
+    return [
+      "Location variant rules:",
+      "- Keep Reference image 1 as the same place: layout, landmarks, entrances, scale, material language, and spatial relationship.",
+      "- Apply only the stable environmental change from the applied references, such as season, damage, construction, decoration, time-state, or occupation-state.",
+      "- Do not redesign the location into a different place."
+    ].join("\n");
+  }
+  return [
+    "Prop/object variant rules:",
+    "- Keep Reference image 1 as the same object identity: silhouette, scale, core structure, material family, and recognizable details.",
+    "- Apply only the stable modification from the applied references, such as upgrade, damage, attachment, colorway, label, or charged state.",
+    "- Do not redesign it into a different object."
+  ].join("\n");
+}
+
+function variantAppliedAssetBrief(appliedAssets = []) {
+  if (!appliedAssets.length) return "";
+  const lines = appliedAssets.map((asset, index) => {
+    const details = filterUniqueStrings([
+      asset.name ? `name: ${asset.name}` : "",
+      (asset.aliases || []).length ? `aliases: ${(asset.aliases || []).join(", ")}` : "",
+      asset.look ? `look: ${asset.look}` : "",
+      asset.function ? `function: ${asset.function}` : "",
+      asset.prompt ? `visual prompt: ${asset.prompt}` : "",
+      asset.appearance ? `appearance: ${asset.appearance}` : "",
+      asset.description ? `description: ${asset.description}` : "",
+      variantAppliedWearableCompletenessBrief(asset)
+    ]);
+    return `Applied asset visual brief ${index + 1} (${asset.id}): ${details.join("; ")}`;
+  });
+  return [
+    "Applied asset visual details to transfer:",
+    ...lines
+  ].join("\n");
+}
+
+function variantAppliedAssetCompactBrief(appliedAssets = []) {
+  if (!appliedAssets.length) return "";
+  const lines = appliedAssets.map((asset, index) => {
+    const aliases = filterUniqueStrings(asset.aliases || []).slice(0, 6);
+    const visual = firstNonEmptyText([asset.look, asset.appearance, asset.prompt, asset.description, asset.function]);
+    const parts = filterUniqueStrings([
+      `${index + 2}. ${asset.name || asset.id || "applied wearable reference"}`,
+      aliases.length ? `keywords: ${aliases.join(", ")}` : "",
+      visual ? `visual: ${truncateVariantPromptText(visual, 260)}` : "",
+      variantAppliedWearableCompletenessBrief(asset)
+    ]);
+    return parts.join("; ");
+  });
+  return [
+    "装备/服装文字补充：",
+    ...lines
+  ].join("\n");
+}
+
+function firstNonEmptyText(values = []) {
+  return (values || []).map((value) => String(value || "").trim()).find(Boolean) || "";
+}
+
+function truncateVariantPromptText(value = "", maxLength = 260) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > maxLength ? `${text.slice(0, Math.max(0, maxLength - 1))}…` : text;
+}
+
+function variantAppliedWearableCompletenessBrief(asset = {}) {
+  if (!appliedAssetLooksLikeWearableSet(asset)) return "";
+  return "wearable-set completeness: treat this as a full-body wearable set unless explicitly partial; transfer head-to-toe wearable regions including helmet/headgear, torso/chest, shoulders, arms/gloves, belt/waist, hips, legs, knees/shins, and boots/footwear; do not leave base pants or shoes unchanged when lower-body armor/clothing is implied";
+}
+
+function appliedAssetLooksLikeWearableSet(asset = {}) {
+  const text = [
+    asset.name,
+    ...(asset.aliases || []),
+    asset.look,
+    asset.function,
+    asset.prompt,
+    asset.appearance,
+    asset.description
+  ].filter(Boolean).join(" ").toLowerCase();
+  return /套装|全套|整套|护具|战士套装|装备形态|armor set|armour set|full[- ]?body|full gear|gear set|outfit|costume|uniform|suit|clothing set|wardrobe set/.test(text);
+}
+
+async function variantAssetReferenceImages(asset = {}, state = {}) {
+  if (!asset?.isVariant) return [];
+  const ids = filterUniqueStrings([asset.parentAssetId, ...(asset.appliedAssetIds || [])]);
+  const rows = [];
+  for (const id of ids) {
+    const kind = id === asset.parentAssetId ? "variant-parent-asset" : "variant-applied-asset";
+    if (shouldUseTextOnlyAppliedVariantReference(asset, kind)) continue;
+    const image = (state.assetImages || []).find((item) => item.assetId === id && item.url);
+    if (!image?.url) continue;
+    const dataUrl = await imageReferenceToDataUrl(image.url);
+    rows.push({
+      url: dataUrl || image.url,
+      originalUrl: image.url,
+      kind,
+      name: image.name || id,
+      assetId: id,
+      mode: dataUrl ? "data-url" : "url"
+    });
+  }
+  return rows;
+}
+
+function shouldUseTextOnlyAppliedVariantReference(asset = {}, kind = "") {
+  if (kind !== "variant-applied-asset") return false;
+  return false;
+}
+
+function shouldUseImageEditForVariant(asset = {}) {
+  if (!asset?.isVariant) return false;
+  const type = normalizeAssetType(asset.type);
+  const changeType = String(asset.sourceChangeType || "").toLowerCase();
+  return type === "character" && /wardrobe|equipment|outfit|armor|clothing|gear/.test(changeType);
+}
+
+function variantReferencePolicyNote(asset = {}, context = {}) {
+  if (!asset?.isVariant) return "";
+  const appliedAssets = context?.appliedAssets || [];
+  if (shouldUseImageEditForVariant(asset)) {
+    return [
+      "parent-image-authoritative",
+      "image-edit-mode",
+      "applied-assets-design-reference",
+      appliedAssets.length ? `applied: ${appliedAssets.map((item) => `${item.id}/${item.name}`).join(", ")}` : ""
+    ].filter(Boolean).join("; ");
+  }
+  return "parent-and-applied-images-authoritative";
+}
+
+function assertVariantReferenceImagesReady(asset = {}, referenceImages = []) {
+  if (!asset?.isVariant) return;
+  const kinds = new Set((referenceImages || []).map((image) => image.kind));
+  const missing = [];
+  if (!kinds.has("variant-parent-asset")) {
+    missing.push(`父资产 ${asset.parentAssetId || asset.variantOf || ""} 的参考图`);
+  }
+  const appliedIds = filterUniqueStrings(asset.appliedAssetIds || []);
+  if (appliedIds.length && !shouldUseTextOnlyAppliedVariantReference(asset, "variant-applied-asset") && !referenceImages.some((image) => image.kind === "variant-applied-asset")) {
+    missing.push(`应用资产 ${appliedIds.join(", ")} 的参考图`);
+  }
+  if (missing.length) {
+    throw new Error(`变体资产必须使用图文参考生成，缺少${missing.join("、")}，请先生成或上传这些资产图`);
+  }
+}
+
 async function imageReferenceToDataUrl(imageUrl = "") {
   const value = String(imageUrl || "").trim();
   if (!value) return "";
@@ -3060,6 +4244,45 @@ async function imageReferenceToDataUrl(imageUrl = "") {
     console.warn(`Unable to read style reference image ${value}: ${error.message}`);
     return "";
   }
+}
+
+async function imageReferenceToUploadFile(reference = {}, index = 0) {
+  const url = String(reference?.url || reference || "").trim();
+  if (!url) throw new Error("Missing image reference for edit request");
+  const name = safeFileName(reference?.name || reference?.assetId || `reference-${index + 1}`);
+  if (url.startsWith("data:image/")) {
+    const match = url.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+    if (!match) throw new Error("Invalid data URL image reference");
+    const ext = extensionForMimeType(match[1]);
+    const bytes = Buffer.from(match[2], "base64");
+    return {
+      blob: new Blob([bytes], { type: match[1] }),
+      filename: `${name}-${index + 1}${ext}`
+    };
+  }
+  const localPath = localImagePathFromUrl(url);
+  if (localPath) {
+    const bytes = await fs.readFile(localPath);
+    const mime = mimeTypeForImagePath(localPath);
+    const ext = path.extname(localPath).toLowerCase() || extensionForMimeType(mime);
+    return {
+      blob: new Blob([bytes], { type: mime }),
+      filename: `${name}-${index + 1}${ext}`
+    };
+  }
+  if (/^https?:\/\//i.test(url)) {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Unable to fetch remote image reference HTTP ${response.status}`);
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    const contentType = response.headers.get("content-type") || "image/png";
+    return {
+      blob: new Blob([arrayBuffer], { type: contentType }),
+      filename: `${name}-${index + 1}${extensionForMimeType(contentType)}`
+    };
+  }
+  throw new Error(`Unsupported image reference for edit request: ${url}`);
 }
 
 function localCachePathFromUrl(url = "") {
@@ -3095,11 +4318,23 @@ function mimeTypeForImagePath(filePath = "") {
   }[ext] || "image/png";
 }
 
+function extensionForMimeType(mimeType = "") {
+  const value = String(mimeType || "").split(";")[0].trim().toLowerCase();
+  return {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif"
+  }[value] || ".png";
+}
+
 function publicReferenceImageInfo(image = {}) {
   return {
     url: image.originalUrl || image.url || "",
     kind: image.kind || "reference",
     name: image.name || "",
+    assetId: image.assetId || "",
     mode: image.mode || (String(image.url || "").startsWith("data:image/") ? "data-url" : "url")
   };
 }
@@ -3213,6 +4448,58 @@ function stripAssetFromPromptPackage(pack = {}, assetId = "") {
     }))
   };
   return { pack: next, changed };
+}
+
+function stripAssetFromContinuityState(row = {}, assetId = "") {
+  let changed = false;
+  const same = (value) => value === assetId;
+  const removeIds = (ids) => {
+    const input = Array.isArray(ids) ? ids : [];
+    const output = input.filter((id) => id !== assetId);
+    if (output.length !== input.length) changed = true;
+    return output;
+  };
+  const clearId = (value) => {
+    if (same(value)) {
+      changed = true;
+      return "";
+    }
+    return value || "";
+  };
+  const next = {
+    ...row,
+    characters: (row.characters || []).map((item) => ({
+      ...item,
+      assetId: clearId(item.assetId),
+      activeVariantId: clearId(item.activeVariantId),
+      wearing: removeIds(item.wearing),
+      holding: removeIds(item.holding),
+      carrying: (item.carrying || []).map((carry) => ({
+        ...carry,
+        assetId: clearId(carry.assetId)
+      })).filter((carry) => carry.assetId || carry.position)
+    })).filter((item) => item.assetId || item.emotion || item.pose || item.injury || item.location || item.wearing?.length || item.holding?.length || item.carrying?.length),
+    location: {
+      ...(row.location || {}),
+      primaryAssetId: clearId(row.location?.primaryAssetId),
+      parentAssetIds: removeIds(row.location?.parentAssetIds)
+    },
+    props: (row.props || []).map((item) => ({
+      ...item,
+      assetId: clearId(item.assetId),
+      ownerAssetId: clearId(item.ownerAssetId)
+    })).filter((item) => item.assetId || item.ownerAssetId || item.position || item.state),
+    relations: (row.relations || []).map((item) => ({
+      ...item,
+      fromAssetId: clearId(item.fromAssetId),
+      toAssetId: clearId(item.toAssetId)
+    })).filter((item) => item.fromAssetId || item.toAssetId || item.type || item.state),
+    variantCandidates: (row.variantCandidates || []).map((item) => ({
+      ...item,
+      baseAssetId: clearId(item.baseAssetId)
+    })).filter((item) => item.baseAssetId || item.name || item.reason)
+  };
+  return { state: next, changed };
 }
 
 function videoUsesAsset(video = {}, assetId = "") {
@@ -3497,6 +4784,29 @@ function mockCards(config, script) {
         prompt: `small silver courier package, glowing blue-white memory chip, circuit seams, key prop, ${config.project.visualStyle}`
       }
     ]
+  };
+}
+
+function mockContinuityStates(episode = {}, shots = []) {
+  return {
+    continuityStates: (shots || []).map((shot, index) => ({
+      shotId: shot.id,
+      summary: `${shot.id} 承接上一镜，保持角色、道具和场景状态稳定；本镜结束状态用于下一镜继承。`,
+      characters: [],
+      location: {
+        primaryAssetId: "",
+        parentAssetIds: [],
+        zone: shot.sceneId || "",
+        damageState: ""
+      },
+      props: [],
+      relations: [],
+      continuity: {
+        fromPrevious: shot.entryBeat || (index === 0 ? "本集开场状态。" : "继承上一分镜的结束状态。"),
+        toNext: shot.exitBeat || "下一分镜默认继承本镜结束状态。"
+      },
+      variantCandidates: []
+    }))
   };
 }
 
@@ -4245,6 +5555,28 @@ function normalizeAssetName(name) {
   return String(name || "").trim().toLowerCase();
 }
 
+function assertPromptPackageShotAssetsReady(shots = [], cards = {}) {
+  const assets = flattenCards(cards);
+  const missingRows = shots.map((shot) => {
+    const existingRefs = filterUniqueStrings(shot.assetRefs || []);
+    if (existingRefs.length) return null;
+    const text = shotAssetText(shot);
+    const matched = assets.filter((asset) => {
+      if (!asset?.id) return false;
+      const identityMatch = assetIdentityTerms(asset).some((term) => text.includes(term));
+      if (!identityMatch) return false;
+      return !minorOrAtmosphereAsset(asset);
+    }).slice(0, MAX_SHOT_ASSET_REFS);
+    if (!matched.length) return null;
+    return {
+      shotId: shot.id || "",
+      assets: matched.map((asset) => asset.name || asset.id).filter(Boolean)
+    };
+  }).filter(Boolean);
+  if (!missingRows.length) return;
+  throw new Error(`请先确认本分镜参考资产后再生成提示词包：${missingRows.map((row) => `${row.shotId} 建议添加 ${row.assets.join("、")}`).join("；")}`);
+}
+
 function selectedShotsForAssetExtraction(state = {}, payload = {}) {
   if (payload.scope !== "shot" && !Array.isArray(payload.shotIds)) {
     return allEpisodeShots(state);
@@ -4596,13 +5928,14 @@ function assetListKey(type) {
   }[type] || "props";
 }
 
-function manualAssetCard({ id, type, name, prompt, description, source }) {
+function manualAssetCard({ id, type, name, prompt, description, source } = {}, extras = {}) {
   const base = {
     id,
     name,
     aliases: normalizeAliases(name),
     prompt,
-    source: source || "manual"
+    source: source || "manual",
+    ...extras
   };
   if (type === "character") {
     return {
@@ -4813,6 +6146,7 @@ function countCards(cards = {}) {
 function flattenCards(cards = {}) {
   return [
     ...(cards.characters || []).map((card) => ({
+      ...card,
       id: card.id,
       type: "character",
       name: card.name,
@@ -4821,6 +6155,7 @@ function flattenCards(cards = {}) {
       prompt: card.prompt || ""
     })),
     ...(cards.locations || []).map((card) => ({
+      ...card,
       id: card.id,
       type: "location",
       name: card.name,
@@ -4829,6 +6164,7 @@ function flattenCards(cards = {}) {
       prompt: card.prompt || ""
     })),
     ...(cards.props || []).map((card) => ({
+      ...card,
       id: card.id,
       type: "prop",
       name: card.name,
@@ -4937,6 +6273,36 @@ async function postJson(endpoint, apiKey, payload, timeoutMs = 60000) {
         "authorization": `Bearer ${apiKey}`
       },
       body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    const text = await response.text();
+    let data = text;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // Some custom adapters return plain text.
+    }
+    if (!response.ok) {
+      const message = typeof data === "string" ? data : data?.error?.message || JSON.stringify(data);
+      throw new Error(`HTTP ${response.status}: ${message}`);
+    }
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function postMultipart(endpoint, apiKey, form, timeoutMs = 60000) {
+  const controller = new AbortController();
+  const requestTimeoutMs = Number(timeoutMs) || 60000;
+  const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "authorization": `Bearer ${apiKey}`
+      },
+      body: form,
       signal: controller.signal
     });
     const text = await response.text();
@@ -5717,7 +7083,7 @@ async function saveManualAsset(payload = {}) {
     prompt,
     description,
     source: existing?.source || "manual"
-  });
+  }, preserveAssetMetadata(existing));
   state.cards[listKey] = [
     ...(state.cards[listKey] || []).filter((item) => item.id !== id),
     card
@@ -5749,6 +7115,22 @@ async function saveManualAsset(payload = {}) {
   return { ok: true, state, asset: card };
 }
 
+function preserveAssetMetadata(existing = null) {
+  if (!existing) return {};
+  const keys = [
+    "isVariant",
+    "parentAssetId",
+    "variantOf",
+    "appliedAssetIds",
+    "sourceShotIds",
+    "variantStatus",
+    "sourceChangeType",
+    "variantReason",
+    "createdFrom"
+  ];
+  return Object.fromEntries(keys.filter((key) => existing[key] !== undefined).map((key) => [key, existing[key]]));
+}
+
 async function deleteAsset(assetId) {
   if (!assetId) {
     throw new Error("Missing asset id");
@@ -5778,6 +7160,11 @@ async function deleteAsset(assetId) {
       const filtered = stripAssetFromPromptPackage(pack, assetId);
       if (filtered.changed) touched = true;
       return filtered.pack;
+    });
+    episode.continuityStates = (episode.continuityStates || []).map((row) => {
+      const filtered = stripAssetFromContinuityState(row, assetId);
+      if (filtered.changed) touched = true;
+      return filtered.state;
     });
     episode.videos = (episode.videos || []).map((video) => {
       const usesAsset = videoUsesAsset(video, assetId);
@@ -6425,6 +7812,7 @@ function normalizeState(raw = {}) {
   state.events = Array.isArray(raw.events) ? raw.events : [];
   state.jobs = normalizeJobs(raw.jobs);
   for (const episode of state.episodes) {
+    episode.continuityStates = normalizeExistingContinuityStates(episode.continuityStates || [], episode.shots || [], state.cards);
     episode.promptPackages = hydratePromptPackageReferences(episode.promptPackages || [], state.cards, state.assetImages);
   }
   delete state.script;
@@ -6464,6 +7852,7 @@ function normalizeEpisode(raw = {}, fallbackOrder = 1, fallbackScript = null) {
     scriptStructuredAt: stringOr(raw.scriptStructuredAt || raw.script_structured_at, script ? raw.updatedAt || raw.createdAt || now : ""),
     scriptAdapterError: stringOr(raw.scriptAdapterError || raw.script_adapter_error, ""),
     shots: normalizedShots,
+    continuityStates: Array.isArray(raw.continuityStates) ? raw.continuityStates : Array.isArray(raw.continuity_states) ? raw.continuity_states : [],
     promptPackages: Array.isArray(raw.promptPackages) ? raw.promptPackages : [],
     images: Array.isArray(raw.images) ? raw.images : [],
     videos: Array.isArray(raw.videos) ? raw.videos : [],
