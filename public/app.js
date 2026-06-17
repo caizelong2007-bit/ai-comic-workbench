@@ -148,6 +148,7 @@ let pendingDelete = null;
 let promptEditor = null;
 let shotEditor = null;
 let shotAssetPicker = null;
+let continuityEditor = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -221,6 +222,12 @@ function bindElements() {
     "saveShotEditorBtn",
     "shotEditorTitle",
     "shotEditorMeta",
+    "continuityEditorModal",
+    "continuityEditorForm",
+    "closeContinuityEditorBtn",
+    "cancelContinuityEditorBtn",
+    "continuityEditorTitle",
+    "continuityEditorMeta",
     "eventsModal",
     "closeEventsModalBtn",
     "eventsRefreshBtn",
@@ -252,6 +259,7 @@ function bindElements() {
     "inheritedAttrs",
     "genScriptBtn",
     "genShotsBtn",
+    "genContinuityBtn",
     "genCardsBtn",
     "genImagesBtn",
     "genVideosBtn",
@@ -363,6 +371,12 @@ function bindEvents() {
     if (event.target === els.shotEditorModal) closeShotEditorModal();
   });
   els.shotEditorForm.addEventListener("submit", saveShotEditorEdits);
+  els.closeContinuityEditorBtn.addEventListener("click", closeContinuityEditorModal);
+  els.cancelContinuityEditorBtn.addEventListener("click", closeContinuityEditorModal);
+  els.continuityEditorModal.addEventListener("click", (event) => {
+    if (event.target === els.continuityEditorModal) closeContinuityEditorModal();
+  });
+  els.continuityEditorForm.addEventListener("submit", saveContinuityEditorEdits);
   els.assetForm.addEventListener("submit", saveManualAsset);
   els.assetImageFileInput.addEventListener("change", loadAssetImageFile);
   els.saveStoryBtn.addEventListener("click", saveStoryScript);
@@ -390,6 +404,7 @@ function bindEvents() {
   els.addEpisodeBtn.addEventListener("click", openCreateEpisodeModal);
   els.genScriptBtn.addEventListener("click", () => runStage("script"));
   els.genShotsBtn.addEventListener("click", () => runStage("shots"));
+  els.genContinuityBtn.addEventListener("click", () => runContinuityStatesForCurrentEpisode());
   els.genCardsBtn.addEventListener("click", () => runStage("cards"));
   els.genImagesBtn.addEventListener("click", () => runStage("images"));
   els.genVideosBtn.addEventListener("click", () => runStage("videos"));
@@ -422,6 +437,26 @@ function bindEvents() {
     const editShotButton = event.target.closest("[data-edit-shot]");
     if (editShotButton) {
       openShotEditorModal(editShotButton.dataset.editShot);
+      return;
+    }
+    const editContinuityButton = event.target.closest("[data-edit-continuity]");
+    if (editContinuityButton) {
+      openContinuityEditorModal(editContinuityButton.dataset.editContinuity);
+      return;
+    }
+    const generateContinuityButton = event.target.closest("[data-generate-continuity]");
+    if (generateContinuityButton) {
+      runContinuityState(generateContinuityButton.dataset.generateContinuity);
+      return;
+    }
+    const acceptVariantButton = event.target.closest("[data-accept-variant]");
+    if (acceptVariantButton) {
+      acceptVariantCandidateFromShot(acceptVariantButton, event.target.closest("[data-shot-row]")?.dataset.shotRow || "");
+      return;
+    }
+    const applyVariantButton = event.target.closest("[data-apply-variant]");
+    if (applyVariantButton) {
+      applyVariantAssetToShot(applyVariantButton, event.target.closest("[data-shot-row]")?.dataset.shotRow || "");
       return;
     }
     const viewPromptButton = event.target.closest("[data-view-prompt]");
@@ -791,6 +826,12 @@ function clientJobKeyFromServer(job = {}) {
     const parts = scopeId.split(":").filter(Boolean);
     if (parts.length >= 2) return promptJobKeyForEpisode(parts[0], parts.slice(1).join(":"));
     return `prompt-package:legacy:${scopeId || "global"}`;
+  }
+  if (job.type === "continuity-state") {
+    const scopeId = String(job.scopeId || "");
+    const parts = scopeId.split(":").filter(Boolean);
+    if (parts.length >= 2) return continuityJobKeyForEpisode(parts[0], parts.slice(1).join(":"));
+    return continuityJobKey(scopeId || "");
   }
   if (job.type === "video-clip") {
     return `video-clip:${job.scopeId || "video-clips"}`;
@@ -1210,6 +1251,76 @@ function closeShotEditorModal() {
   els.shotEditorModal.classList.add("is-hidden");
   els.shotEditorForm.reset();
   shotEditor = null;
+}
+
+function openContinuityEditorModal(shotId) {
+  const episode = getActiveEpisode();
+  const shot = (episode?.shots || []).find((item) => item.id === shotId);
+  if (!shot) {
+    toast("没有找到分镜");
+    return;
+  }
+  const stateRow = continuityStateForShot(shotId) || defaultContinuityStateForShot(shot);
+  continuityEditor = {
+    episodeId: episode.id,
+    shotId
+  };
+  const form = els.continuityEditorForm;
+  form.elements.summary.value = stateRow.summary || "";
+  form.elements.fromPrevious.value = stateRow.continuity?.fromPrevious || "";
+  form.elements.toNext.value = stateRow.continuity?.toNext || "";
+  form.elements.characters.value = formatContinuityJson(stateRow.characters || []);
+  form.elements.location.value = formatContinuityJson(stateRow.location || {});
+  form.elements.props.value = formatContinuityJson(stateRow.props || []);
+  form.elements.relations.value = formatContinuityJson(stateRow.relations || []);
+  form.elements.stateChanges.value = formatContinuityJson(stateRow.stateChanges || []);
+  form.elements.variantCandidates.value = formatContinuityJson(stateRow.variantCandidates || []);
+  els.continuityEditorTitle.textContent = `编辑连续性状态 ${shot.id}`;
+  els.continuityEditorMeta.textContent = `${shot.durationSec || 15}s / ${shot.sceneId || "未指定场景"}。保存后，该分镜提示词包和视频会被标记为需要更新。`;
+  els.continuityEditorModal.classList.remove("is-hidden");
+  form.elements.summary.focus();
+}
+
+function closeContinuityEditorModal() {
+  els.continuityEditorModal.classList.add("is-hidden");
+  els.continuityEditorForm.reset();
+  continuityEditor = null;
+}
+
+async function saveContinuityEditorEdits(event) {
+  event.preventDefault();
+  if (!continuityEditor?.shotId) return;
+  const form = els.continuityEditorForm;
+  let continuity;
+  try {
+    continuity = {
+      summary: String(form.elements.summary.value || "").trim(),
+      characters: parseContinuityJsonField(form.elements.characters.value, []),
+      location: parseContinuityJsonField(form.elements.location.value, {}),
+      props: parseContinuityJsonField(form.elements.props.value, []),
+      relations: parseContinuityJsonField(form.elements.relations.value, []),
+      stateChanges: parseContinuityJsonField(form.elements.stateChanges.value, []),
+      continuity: {
+        fromPrevious: String(form.elements.fromPrevious.value || "").trim(),
+        toNext: String(form.elements.toNext.value || "").trim()
+      },
+      variantCandidates: parseContinuityJsonField(form.elements.variantCandidates.value, [])
+    };
+  } catch (error) {
+    toast(`连续性 JSON 格式有误：${error.message}`);
+    return;
+  }
+  await withBusy(`continuity:save:${continuityEditor.shotId}`, async () => {
+    const data = await api.post("/api/continuity/save", {
+      episodeId: continuityEditor.episodeId,
+      shotId: continuityEditor.shotId,
+      continuity
+    });
+    applyServerData(data);
+    closeContinuityEditorModal();
+    render();
+    toast("连续性状态已保存，请重新生成对应提示词和视频");
+  }, "保存连续性状态失败");
 }
 
 async function saveShotEditorEdits(event) {
@@ -2004,6 +2115,97 @@ async function runExtractShotAssets(shotId) {
   }
 }
 
+async function runContinuityStatesForCurrentEpisode() {
+  const episode = getActiveEpisode();
+  if (!episode?.shots?.length) {
+    toast("请先生成分镜脚本");
+    return false;
+  }
+  const key = continuityJobKeyForEpisode(episode.id, "");
+  await withBusy(key, async () => {
+    await saveCurrentConfig();
+    const data = await api.post("/api/generate/continuity", { episodeId: episode.id });
+    applyServerData(data);
+    render();
+    if (data.duplicate) {
+      toast("连续性状态正在生成中，请稍后刷新查看");
+      return "keep-running";
+    }
+    toast(`连续性状态已生成${sourceSuffix(data)}`);
+  }, "生成连续性状态失败");
+}
+
+async function runContinuityState(shotId) {
+  const episode = getActiveEpisode();
+  if (!episode?.id || !shotId) {
+    toast("请先选择有效分镜");
+    return false;
+  }
+  await withBusy(continuityJobKey(shotId), async () => {
+    await saveCurrentConfig();
+    const data = await api.post("/api/generate/continuity", {
+      episodeId: episode.id,
+      shotIds: [shotId]
+    });
+    applyServerData(data);
+    render();
+    if (data.duplicate) {
+      toast(`${shotId} 连续性状态正在生成中`);
+      return "keep-running";
+    }
+    toast(`${shotId} 连续性状态已生成${sourceSuffix(data)}`);
+  }, `${shotId} 连续性状态生成失败`);
+}
+
+async function acceptVariantCandidateFromShot(button, shotId = "") {
+  const episode = getActiveEpisode();
+  const baseAssetId = button?.dataset.acceptVariant || "";
+  const name = button?.dataset.variantName || "";
+  if (!episode?.id || !shotId || !baseAssetId || !name) {
+    toast("没有找到有效的变体建议");
+    return;
+  }
+  await withBusy(`variant:accept:${shotId}:${baseAssetId}`, async () => {
+    const data = await api.post("/api/assets/variants/accept", {
+      episodeId: episode.id,
+      shotId,
+      baseAssetId,
+      name,
+      reason: button.dataset.variantReason || "",
+      priority: button.dataset.variantPriority || "medium",
+      sourceChangeType: button.dataset.variantChangeType || "wardrobe_equipment"
+    });
+    applyServerData(data);
+    render();
+    toast(`${name} 已加入资产库，请先生成或上传参考图，再按需引用到分镜`);
+  }, "加入变体资产失败");
+}
+
+async function applyVariantAssetToShot(button, shotId = "") {
+  const episode = getActiveEpisode();
+  const variantAssetId = button?.dataset.applyVariant || "";
+  const name = button?.dataset.variantName || variantAssetId;
+  if (!episode?.id || !shotId || !variantAssetId) {
+    toast("没有找到可引用的变体资产");
+    return;
+  }
+  const asset = findClientAsset(variantAssetId);
+  if (!asset?.imageUrl) {
+    toast("请先为该变体生成或上传参考图，再引用到分镜");
+    return;
+  }
+  await withBusy(`variant:apply:${shotId}:${variantAssetId}`, async () => {
+    const data = await api.post("/api/assets/variants/apply-to-shot", {
+      episodeId: episode.id,
+      shotId,
+      variantAssetId
+    });
+    applyServerData(data);
+    render();
+    toast(`${name} 已引用到 ${shotId}，请重新生成或保存该分镜提示词后再生成视频`);
+  }, "引用变体资产失败");
+}
+
 function openShotAssetPickerModal(shotId = "") {
   const shot = getActiveEpisode()?.shots?.find((item) => item.id === shotId);
   if (!shot) {
@@ -2032,13 +2234,15 @@ function renderShotAssetPickerGrid() {
   }
   els.shotAssetPickerGrid.innerHTML = assets.map((asset) => {
     const selected = currentRefs.has(asset.id);
+    const variantLabel = asset.isVariant ? `变体 · ${asset.parentAssetId || asset.variantOf || ""}` : assetTypeLabel(asset.type);
+    const imageHint = asset.isVariant && !asset.imageUrl ? " · 待参考图" : "";
     return `
       <button class="shot-asset-picker-card ${selected ? "is-selected" : ""}" type="button" data-select-shot-asset="${escapeAttr(asset.id)}" ${selected ? "disabled" : ""}>
         <span class="shot-asset-picker-thumb">
           ${asset.imageUrl ? `<img src="${escapeAttr(asset.imageUrl)}" alt="${escapeAttr(asset.name || asset.id)}">` : `<span>${escapeHtml((asset.name || asset.id || "?").slice(0, 2))}</span>`}
         </span>
         <strong>${escapeHtml(asset.name || asset.id)}</strong>
-        <small>${escapeHtml(assetTypeLabel(asset.type))}${selected ? " · 已在本分镜" : ""}</small>
+        <small>${escapeHtml(variantLabel)}${imageHint}${selected ? " · 已在本分镜" : ""}</small>
       </button>
     `;
   }).join("");
@@ -2675,7 +2879,7 @@ async function withBusy(keyOrTask, taskOrFailPrefix, maybeFailPrefix) {
 }
 
 function shouldPersistJobError(key = "") {
-  return (key.startsWith("prompt-package:") && !key.startsWith("prompt-package:legacy:")) || key.startsWith("episode-script:");
+  return (key.startsWith("prompt-package:") && !key.startsWith("prompt-package:legacy:")) || key.startsWith("episode-script:") || key.startsWith("continuity-state:");
 }
 
 function setJob(key, status, label = "", detail = {}) {
@@ -2744,6 +2948,15 @@ function promptJobKeyForEpisode(episodeId, shotId) {
   return `prompt-package:${[episodeId, shotId].filter(Boolean).join(":") || "global"}`;
 }
 
+function continuityJobKey(shotId) {
+  return continuityJobKeyForEpisode(getActiveEpisode()?.id, shotId);
+}
+
+function continuityJobKeyForEpisode(episodeId, shotId = "") {
+  const scope = shotId ? [episodeId, shotId].filter(Boolean).join(":") : `${episodeId || "global"}:continuity-states`;
+  return `continuity-state:${scope || "global"}`;
+}
+
 function packageAssetsJobKey(packageId) {
   return `package-assets:${packageId}`;
 }
@@ -2764,6 +2977,11 @@ function relatedJobRunning(key) {
   }
   if (key.startsWith("prompt-package:")) {
     return promptGenerating || episodeGenerating || scriptStructuring;
+  }
+  if (key.startsWith("continuity-state:")) {
+    const episodeId = getActiveEpisode()?.id || "";
+    const batchKey = continuityJobKeyForEpisode(episodeId, "");
+    return key !== batchKey && isJobRunning(batchKey);
   }
   if (key.startsWith("asset-image:")) {
     return assetsGenerating;
@@ -2830,6 +3048,7 @@ function updateAvailability() {
   if (els.genShotsBtn) {
     els.genShotsBtn.title = hasEpisodeScript ? "根据当前本集结构化剧本生成 5-15 秒视频分镜脚本" : "请先在分集剧本页生成/完善本集结构化剧本";
   }
+  setStandaloneButtonLoading(els.genContinuityBtn, continuityJobKeyForEpisode(getActiveEpisode()?.id, ""), !hasEpisode || !(getActiveEpisode()?.shots || []).length || relatedJobRunning(continuityJobKeyForEpisode(getActiveEpisode()?.id, "")), "生成中...");
   setButtonLoading(els.genVideosBtn, "videos", !hasEpisode || !(getActiveEpisode()?.shots || []).length || relatedJobRunning(stageJobKey("videos")));
   setStandaloneButtonLoading(els.genVideoClipsBtn, "video-clip:video-clips", !hasEpisode || !(getActiveEpisode()?.promptPackages || []).length || relatedJobRunning("video-clip:video-clips"), "生成中...");
   const pendingVideos = (getActiveEpisode()?.videos || []).filter((video) => video.taskId && !["completed", "failed", "cancelled", "runway-submitted", "runway-external"].includes(String(video.status || "").toLowerCase())).length;
@@ -3401,13 +3620,14 @@ function renderShots(shots, packages) {
     const promptLocked = promptRunning || relatedJobRunning(promptKey);
     const assetsRunning = isJobRunning(packageAssetsJobKey(shot.id));
     return `
-      <article class="shot-pipeline-row ${promptRunning || assetsRunning ? "is-generating" : ""}">
+      <article class="shot-pipeline-row ${promptRunning || assetsRunning ? "is-generating" : ""}" data-shot-row="${escapeAttr(shot.id)}">
         <section class="shot-cell shot-script-cell">
           <span class="shot-ribbon">${escapeHtml(shot.id || "镜头")}</span>
           <div class="shot-cell-actions">
             <button type="button" aria-label="编辑分镜脚本" title="编辑分镜脚本" data-edit-shot="${escapeAttr(shot.id)}">✎</button>
           </div>
           ${renderShotScriptPreview(shot)}
+          ${renderContinuityPanel(shot)}
         </section>
         <section class="shot-cell shot-asset-cell">
           ${assetsRunning ? `<div class="cell-loading"><span class="spinner"></span><strong>正在提取资产</strong></div>` : ""}
@@ -3497,12 +3717,13 @@ function renderCards(cards) {
       const imageUrl = imageByAssetId.get(asset.id) || "";
       const running = isJobRunning(assetJobKey(asset.id)) || isJobRunning(stageJobKey("images"));
       return `
-        <article class="asset-thumb-card ${running ? "is-generating" : ""}" data-edit-asset="${escapeAttr(asset.id)}">
+        <article class="asset-thumb-card ${running ? "is-generating" : ""} ${asset.isVariant ? "is-variant-asset" : ""}" data-edit-asset="${escapeAttr(asset.id)}">
           <div class="asset-thumb ${imageUrl ? "" : "is-empty"}">
             ${running ? `<div class="thumb-loading"><span class="spinner"></span><strong>生成中</strong></div>` : imageUrl ? `<img src="${escapeAttr(imageUrl)}" alt="${escapeAttr(asset.name)}">` : `<span>暂无图片</span>`}
           </div>
           <div class="asset-thumb-body">
             <strong>${escapeHtml(asset.name || asset.id)}</strong>
+            ${asset.isVariant ? `<span class="asset-variant-badge">变体 · ${escapeHtml(asset.parentAssetId || asset.variantOf || "")}</span>` : ""}
             <small>${escapeHtml(asset.prompt || asset.description || "未填写提示词")}</small>
             <div class="card-action-row">
               <button class="mini-action" type="button" data-generate-asset="${escapeAttr(asset.id)}" data-job-key="${escapeAttr(assetJobKey(asset.id))}" data-idle-text="${imageUrl ? "重新生成" : "生成参考图"}" data-loading-text="生成中..." ${running ? "disabled" : ""}>${running ? "生成中..." : imageUrl ? "重新生成" : "生成参考图"}</button>
@@ -3548,6 +3769,143 @@ function renderShotScriptPreview(shot = {}) {
       ${shot.continuity ? `<p><b>衔接</b>${escapeHtml(clipText(shot.continuity, 72))}</p>` : ""}
     </div>
   `;
+}
+
+function continuityStateForShot(shotId = "") {
+  return (getActiveEpisode()?.continuityStates || []).find((row) => row.shotId === shotId) || null;
+}
+
+function defaultContinuityStateForShot(shot = {}) {
+  return {
+    id: `CONT-${shot.id || ""}`,
+    shotId: shot.id || "",
+    summary: shot.continuity || shot.continuityCheck || "",
+    characters: [],
+    location: {
+      primaryAssetId: "",
+      parentAssetIds: [],
+      zone: shot.sceneId || "",
+      damageState: ""
+    },
+    props: [],
+    relations: [],
+    stateChanges: [],
+    continuity: {
+      fromPrevious: shot.entryBeat || "",
+      toNext: shot.exitBeat || ""
+    },
+    variantCandidates: []
+  };
+}
+
+function renderContinuityPanel(shot = {}) {
+  const row = continuityStateForShot(shot.id);
+  const jobKey = continuityJobKey(shot.id);
+  const running = isJobRunning(jobKey) || relatedJobRunning(jobKey);
+  const error = jobs.get(jobKey)?.status === "error" ? jobs.get(jobKey) : null;
+  if (running) {
+    return `
+      <div class="continuity-panel is-live">
+        <span class="spinner"></span>
+        <strong>连续性状态生成中</strong>
+      </div>
+    `;
+  }
+  if (error) {
+    return `
+      <div class="continuity-panel is-error">
+        <strong>连续性状态失败</strong>
+        <small>${escapeHtml(error.serverError || error.label || "")}</small>
+        <button type="button" data-generate-continuity="${escapeAttr(shot.id)}">重试</button>
+      </div>
+    `;
+  }
+  if (!row) {
+    return `
+      <div class="continuity-panel is-empty">
+        <strong>未生成连续性状态</strong>
+        <small>用于记录服装、持物、场景层级和承接关系</small>
+        <button type="button" data-generate-continuity="${escapeAttr(shot.id)}">生成状态</button>
+      </div>
+    `;
+  }
+  const tags = continuityTags(row);
+  return `
+    <div class="continuity-panel">
+      <div class="continuity-panel-head">
+        <strong>连续性状态</strong>
+        <button type="button" aria-label="编辑连续性状态" title="编辑连续性状态" data-edit-continuity="${escapeAttr(shot.id)}">✎</button>
+      </div>
+      ${row.summary ? `<p>${escapeHtml(clipText(row.summary, 74))}</p>` : ""}
+      ${row.continuity?.fromPrevious ? `<small><b>承接</b>${escapeHtml(clipText(row.continuity.fromPrevious, 56))}</small>` : ""}
+      ${row.continuity?.toNext ? `<small><b>转出</b>${escapeHtml(clipText(row.continuity.toNext, 56))}</small>` : ""}
+      ${tags.length ? `<div class="continuity-tags">${tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
+      ${renderVariantCandidatePreview(row.variantCandidates || [], shot)}
+    </div>
+  `;
+}
+
+function renderVariantCandidatePreview(candidates = [], shot = {}) {
+  const rows = Array.isArray(candidates) ? candidates.filter((item) => item?.name || item?.baseAssetId || item?.reason) : [];
+  if (!rows.length) return "";
+  return `
+    <div class="variant-candidate-preview">
+      <b>变体资产建议</b>
+      ${rows.slice(0, 3).map((item) => renderVariantCandidateRow(item, shot)).join("")}
+      ${rows.length > 3 ? `<small>另有 ${rows.length - 3} 条，点编辑查看</small>` : ""}
+    </div>
+  `;
+}
+
+function renderVariantCandidateRow(item = {}, shot = {}) {
+  const variantId = item.acceptedVariantId || item.accepted_variant_id || "";
+  const variantAsset = variantId ? findClientAsset(variantId) : null;
+  const hasImage = Boolean(variantAsset?.imageUrl);
+  const applied = variantId && (shot.assetRefs || []).includes(variantId);
+  return `
+    <span title="${escapeAttr(item.reason || "")}">
+      <i>${escapeHtml(item.name || item.baseAssetId || "未命名变体")}</i>
+      ${item.priority ? `<em>${escapeHtml(priorityLabel(item.priority))}</em>` : ""}
+      ${applied ? `<em>已引用</em>` : item.status === "accepted" && variantId
+        ? `<button type="button" data-apply-variant="${escapeAttr(variantId)}" data-variant-name="${escapeAttr(item.name || variantAsset?.name || variantId)}" ${hasImage ? "" : "disabled"} title="${hasImage ? "替换本分镜中的父资产参考" : "请先在资产库生成或上传该变体参考图"}">引用到本镜</button>`
+        : `<button type="button" data-accept-variant="${escapeAttr(item.baseAssetId || "")}" data-variant-name="${escapeAttr(item.name || "")}" data-variant-reason="${escapeAttr(item.reason || "")}" data-variant-priority="${escapeAttr(item.priority || "medium")}" data-variant-change-type="${escapeAttr(item.sourceChangeType || "wardrobe_equipment")}">加入资产库</button>`}
+      ${item.status === "accepted" && !applied ? `<em>${hasImage ? "待引用" : "待参考图"}</em>` : ""}
+    </span>
+  `;
+}
+
+function priorityLabel(value = "") {
+  return {
+    high: "高",
+    medium: "中",
+    low: "低"
+  }[String(value || "").toLowerCase()] || value || "";
+}
+
+function continuityTags(row = {}) {
+  const tags = [];
+  const assetName = (id) => findClientAsset(id)?.name || id;
+  for (const character of row.characters || []) {
+    if (character.assetId) tags.push(`角色 ${assetName(character.assetId)}`);
+    if ((character.wearing || []).length) tags.push(`穿戴 ${character.wearing.map(assetName).join("、")}`);
+    if ((character.holding || []).length) tags.push(`持有 ${character.holding.map(assetName).join("、")}`);
+  }
+  if (row.location?.primaryAssetId) tags.push(`场景 ${assetName(row.location.primaryAssetId)}`);
+  if ((row.location?.parentAssetIds || []).length) tags.push(`父场景 ${row.location.parentAssetIds.map(assetName).join("、")}`);
+  if ((row.props || []).length) tags.push(`${row.props.length} 个道具状态`);
+  if ((row.variantCandidates || []).length) tags.push(`${row.variantCandidates.length} 个变体候选`);
+  else if ((row.stateChanges || []).length) tags.push(`${row.stateChanges.length} 个状态变化`);
+  return tags.slice(0, 6);
+}
+
+function formatContinuityJson(value) {
+  return JSON.stringify(value == null ? null : value, null, 2);
+}
+
+function parseContinuityJsonField(value, fallback) {
+  const text = String(value || "").trim();
+  if (!text) return structuredClone(fallback);
+  return JSON.parse(text);
 }
 
 function shotReferenceAssets(shot = {}, assets = []) {
@@ -4268,6 +4626,7 @@ function normalizeClientState(raw = {}) {
       script: raw.script || storyScript,
       synopsis: raw.script?.synopsis || storyScript?.synopsis || "",
       shots: raw.shots || [],
+      continuityStates: raw.continuityStates || [],
       promptPackages: raw.promptPackages || [],
       images: raw.images || [],
       videos: raw.videos || []
@@ -4307,6 +4666,7 @@ function normalizeClientEpisode(raw = {}, fallbackOrder = 1) {
     scriptStructuredAt: raw.scriptStructuredAt || raw.script_structured_at || "",
     scriptAdapterError: String(raw.scriptAdapterError || raw.script_adapter_error || "").trim(),
     shots: Array.isArray(raw.shots) ? raw.shots : [],
+    continuityStates: Array.isArray(raw.continuityStates) ? raw.continuityStates : Array.isArray(raw.continuity_states) ? raw.continuity_states : [],
     promptPackages: Array.isArray(raw.promptPackages) ? raw.promptPackages : [],
     images: Array.isArray(raw.images) ? raw.images : [],
     videos: Array.isArray(raw.videos) ? raw.videos : []
