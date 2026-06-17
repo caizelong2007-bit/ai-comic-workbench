@@ -297,6 +297,7 @@
           </div>
           <div class="button-row">
             <button id="genShotsBtn" class="primary">自动生成分镜脚本</button>
+            <button id="genContinuityBtn" type="button">生成连续性状态</button>
             <button id="genVideosBtn">批量生成 Seedance 提示词</button>
             <button id="exportPromptPackagesBtn" type="button">导出提示词包</button>
           </div>
@@ -597,6 +598,32 @@
         <div class="modal-actions prompt-detail-actions">
           <button id="cancelShotEditorBtn" type="button">取消</button>
           <button id="saveShotEditorBtn" class="primary" type="submit">保存分镜</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="continuityEditorModal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="continuityEditorTitle">
+    <div class="modal-card continuity-editor-modal-card">
+      <button id="closeContinuityEditorBtn" class="modal-close" aria-label="关闭">×</button>
+      <h2 id="continuityEditorTitle">编辑连续性状态</h2>
+      <p id="continuityEditorMeta" class="muted-text"></p>
+      <form id="continuityEditorForm" class="shot-editor-form">
+        <label><span>状态摘要</span><textarea name="summary" rows="3"></textarea></label>
+        <div class="shot-editor-grid">
+          <label><span>承接上镜</span><textarea name="fromPrevious" rows="4"></textarea></label>
+          <label><span>引向下镜</span><textarea name="toNext" rows="4"></textarea></label>
+        </div>
+        <label><span>角色状态 JSON</span><textarea name="characters" rows="7" spellcheck="false"></textarea></label>
+        <label><span>场景状态 JSON</span><textarea name="location" rows="5" spellcheck="false"></textarea></label>
+        <label><span>道具状态 JSON</span><textarea name="props" rows="6" spellcheck="false"></textarea></label>
+        <label><span>关系进展 JSON</span><textarea name="relations" rows="5" spellcheck="false"></textarea></label>
+        <label><span>状态变化决策 JSON</span><textarea name="stateChanges" rows="7" spellcheck="false"></textarea></label>
+        <label><span>变体候选 JSON</span><textarea name="variantCandidates" rows="6" spellcheck="false"></textarea></label>
+        <small class="prompt-box">连续性状态只描述当前分镜中已经成立的角色服装、持物、场景层级、破损和关系变化。保存后会提示重新生成该分镜提示词和视频。</small>
+        <div class="modal-actions prompt-detail-actions">
+          <button id="cancelContinuityEditorBtn" type="button">取消</button>
+          <button class="primary" type="submit">保存连续性状态</button>
         </div>
       </form>
     </div>
